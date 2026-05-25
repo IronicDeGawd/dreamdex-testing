@@ -4,3 +4,6 @@ build/
 *.elf
 *.hex
 *.map
+
+# Real WiFi credentials — local only
+wifi_secrets.h
