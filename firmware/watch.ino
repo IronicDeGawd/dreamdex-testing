@@ -532,6 +532,13 @@ void scanWiFi() {
   display.print("Scanning WiFi...");
   display.display();
 
+  // Force radio into a known-clean STA state. Without this, scanning can
+  // leave the C3's WiFi state machine half-initialised and the next
+  // WiFi.begin() call fails with "sta is connecting, cannot set config".
+  WiFi.disconnect(true, true);   // erase prior config + stop any in-flight conn
+  WiFi.mode(WIFI_STA);
+  delay(100);
+
   wifiCount = WiFi.scanNetworks();
   wifiScanned = true;
 
@@ -546,6 +553,8 @@ void scanWiFi() {
       }
     }
   }
+  // Free the scan result buffer — leaves the radio cleanly idle for begin().
+  WiFi.scanDelete();
 }
 
 void connectToSelected() {
@@ -568,14 +577,40 @@ void connectToSelected() {
   display.print(ssid);
   display.display();
 
+  // Tear down any prior/in-flight association before begin(). The C3's WiFi
+  // driver rejects begin() with "sta is connecting, cannot set config" if
+  // a previous attempt is still mid-association. disconnect(true,true) wipes
+  // the cached SSID/pass and clears the state machine.
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_STA);
+  delay(100);
   WiFi.begin(ssid.c_str(), pass);
+
   int tries = 0;
-  while (WiFi.status() != WL_CONNECTED && tries < 20) {
+  while (WiFi.status() != WL_CONNECTED && tries < 30) {
     delay(500); tries++;
+    // Show progress dots so the user knows it's not frozen
+    display.print(".");
+    display.display();
   }
   if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("[wifi] connected ssid=%s ip=%s rssi=%d\n",
+                  ssid.c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
     currentMenu = MENU_PRICES;
     fetchData();
+  } else {
+    Serial.printf("[wifi] connect FAILED status=%d (1=NO_SSID, 4=CONN_FAIL, 6=DISCONN)\n",
+                  WiFi.status());
+    display.clearDisplay();
+    display.setCursor(0, 16); display.print("Connect failed");
+    display.setCursor(0, 28); display.print("status=");
+    display.print(WiFi.status());
+    display.setCursor(0, 44); display.print("SELECT to retry");
+    display.display();
+    delay(2000);
+    // Re-scan so the user can re-pick — clears stale state
+    WiFi.disconnect(true, true);
+    scanWiFi();
   }
 }
 
