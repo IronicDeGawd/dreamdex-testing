@@ -113,13 +113,28 @@ class Portfolio:
         total_vault = sum(vault_totals.values())
         total_usdso = wallet_usdso + total_vault
 
+        # Native gas-token balance (SOMI on mainnet, STT on testnet) — small
+        # quantity used for tx gas. Expose so the dashboard can show "gas:".
+        try:
+            native_wei = self.w3.eth.get_balance(me)
+            native_balance = native_wei / 1e18
+        except Exception:
+            native_balance = 0.0
+
         with self._lock:
             self._stats = {
-                "agent_balance":  total_usdso,          # USDso wallet + all vault USDso (single source of truth)
-                "manual_balance": MANUAL_CAPITAL,        # kept constant (user tracks manually)
-                "total_value":    total_usdso + MANUAL_CAPITAL,
+                # Single source of truth for the wallet's USDso position.
+                "agent_balance":  total_usdso,
+                # Reserved "manual" budget is purely a planning device — there is
+                # no separate manual wallet. Kept for backward compat but no
+                # longer summed into total_value.
+                "manual_balance": MANUAL_CAPITAL,
+                # Real on-chain total of trade-able USDso (wallet + all pool vaults).
+                # NOT inflated by a phantom manual reserve. Dashboard PnL = total_value - 50.
+                "total_value":    total_usdso,
                 "usdso_wallet":   wallet_usdso,
                 "usdso_vaults":   vault_totals,
+                "native_balance": native_balance,        # SOMI/STT for gas
                 "last_refresh":   time.time(),           # C2: agent uses this to detect stale data
             }
 
