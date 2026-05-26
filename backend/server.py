@@ -118,6 +118,20 @@ def set_max_orders():
     _agent.set_max_orders(n)
     return jsonify({"ok": True, "max_orders": _agent.max_orders})
 
+@app.route("/agent/mode", methods=["GET", "POST"])
+def agent_mode():
+    """Switch brain strategy: 'grind' (volume) or 'profit' (momentum). AUTHED on POST."""
+    from agent import brain
+    if request.method == "GET":
+        return jsonify({"mode": brain.get_mode()})
+    require_api_key()
+    mode = request.json.get("mode", "grind")
+    try:
+        brain.set_mode(mode)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, "mode": brain.get_mode()})
+
 @app.route("/vault/deposit", methods=["POST"])
 def vault_deposit():
     """Deposit funds into the SpotPool vault. AUTHED."""
