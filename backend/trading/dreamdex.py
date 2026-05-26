@@ -318,17 +318,19 @@ class DreamDEX:
             book = self.get_orderbook(symbol)
             if side.lower() == "buy":
                 top = book["ask"]
-                # If no asks, an IOC buy can't fill — abort early per devrel:
-                # "Confirm the book actually has bids/asks before sending."
                 if not top:
                     return {"status": "error", "error": "no asks in book — would silent-reject"}
-                # Cross the book by one tick to guarantee match
-                raw_price = top + tick
+                # R3: +1 tick was empirically not crossing on mainnet (likely
+                # JIT/MEV layer pulls the ask). +5 ticks fills cleanly via
+                # wallet funding. Tiny extra slippage for actual fills.
+                raw_price = top + 5 * tick
             else:
                 top = book["bid"]
                 if not top:
                     return {"status": "error", "error": "no bids in book — would silent-reject"}
-                raw_price = max(top - tick, tick)
+                # Symmetric buffer for sells. Wallet-funded sells fill at -1 tick
+                # in our tests, but keep some headroom for thin-bid moments.
+                raw_price = max(top - 3 * tick, tick)
             # M2: format price at exactly the tick's decimal precision so
             # floating-point artifacts (0.0000999…) don't survive rstrip("0").
             tick_str = f"{tick:.10f}".rstrip("0")
@@ -427,38 +429,66 @@ class DreamDEX:
             if not sim_ok:
                 return {"status": "would_revert", "sim_raw": sim_raw[:200]}
 
-            # C4: capture pre-trade vault balances so we can prove a real fill
-            # via balance delta rather than heuristic log matching.
+            # C4 + R1: capture pre-trade balances. Native pools deliver base to the
+            # EOA wallet, not the vault — so for those we must read both vault and
+            # wallet native. After tx mining we wait briefly to let dreamDEX's
+            # in-block settlement land before re-reading. Fill is proven only if
+            # BOTH sides moved in the expected direction (single-side movement =
+            # order placed but didn't match, USDso/base just reserved).
+            import time as _time
             from web3 import Web3 as _Web3
             from config import MARKETS as _MARKETS
             mkt = _MARKETS.get(symbol, {})
+            is_native = bool(mkt.get("native"))
             pool_addr_cs = _Web3.to_checksum_address(resp.get("to") or mkt.get("contract", ""))
             quote_addr_cs = _Web3.to_checksum_address(mkt["quote"]) if mkt.get("quote") else None
             base_addr_cs = None
-            if mkt.get("base") and not mkt.get("native") and int(mkt["base"], 16) != 0:
+            if mkt.get("base") and not is_native and int(mkt["base"], 16) != 0:
                 base_addr_cs = _Web3.to_checksum_address(mkt["base"])
             wb_abi = [{
                 "name": "getWithdrawableBalance", "type": "function", "stateMutability": "view",
                 "inputs": [{"name": "u", "type": "address"}, {"name": "t", "type": "address"}],
                 "outputs": [{"name": "", "type": "uint256"}],
             }]
+            erc20_abi = [{
+                "name":"balanceOf","type":"function","stateMutability":"view",
+                "inputs":[{"name":"a","type":"address"}],"outputs":[{"name":"","type":"uint256"}],
+            }]
             pool_c = self.wallet.w3.eth.contract(address=pool_addr_cs, abi=wb_abi)
+            quote_tok = self.wallet.w3.eth.contract(address=quote_addr_cs, abi=erc20_abi) if quote_addr_cs else None
+            base_tok = self.wallet.w3.eth.contract(address=base_addr_cs, abi=erc20_abi) if base_addr_cs else None
 
-            def _read_vault():
-                pre = {"quote": 0, "base": 0}
+            def _read_state():
+                """Read both vault and wallet balances. The wallet side is what
+                catches wallet-funded fills (which leave the vault untouched)."""
+                st = {"v_quote": 0, "v_base": 0, "w_quote": 0, "w_base": 0, "w_native": 0}
                 try:
                     if quote_addr_cs:
-                        pre["quote"] = pool_c.functions.getWithdrawableBalance(self.wallet.address, quote_addr_cs).call()
+                        st["v_quote"] = pool_c.functions.getWithdrawableBalance(self.wallet.address, quote_addr_cs).call()
                 except Exception:
                     pass
                 try:
                     if base_addr_cs:
-                        pre["base"] = pool_c.functions.getWithdrawableBalance(self.wallet.address, base_addr_cs).call()
+                        st["v_base"] = pool_c.functions.getWithdrawableBalance(self.wallet.address, base_addr_cs).call()
                 except Exception:
                     pass
-                return pre
+                try:
+                    if quote_tok:
+                        st["w_quote"] = quote_tok.functions.balanceOf(self.wallet.address).call()
+                except Exception:
+                    pass
+                try:
+                    if base_tok:
+                        st["w_base"] = base_tok.functions.balanceOf(self.wallet.address).call()
+                except Exception:
+                    pass
+                try:
+                    st["w_native"] = self.wallet.w3.eth.get_balance(self.wallet.address)
+                except Exception:
+                    pass
+                return st
 
-            vault_before = _read_vault()
+            state_before = _read_state()
 
             # Sign + broadcast the order tx
             tx_hash = self.wallet.send_unsigned_tx(resp)
@@ -471,40 +501,70 @@ class DreamDEX:
                 print(f"[DreamDEX] ❌ TX reverted on-chain (status={status})")
                 return {"status": "reverted", "tx_hash": tx_hash}
 
-            # C4: Real fill detection via vault balance delta. Buy decreases quote +
-            # increases base; sell does the opposite. Vault funding is the only
-            # path place_order uses for this client, so vault-delta is authoritative.
-            # For wallet-funded orders (no vault movement), we fall back to the
-            # log heuristic — still flagging "any pool log" as a softer signal.
-            vault_after = _read_vault()
+            # R1: brief settlement delay — dreamDEX sometimes credits/debits
+            # asynchronously within a few seconds of mining.
+            _time.sleep(3)
+            state_after = _read_state()
+
+            # Estimate gas cost (in native units) so we don't mistake it for inventory loss.
+            gas_used = int(receipt.get("gasUsed", 0) or 0)
+            tx_obj = None
+            try:
+                tx_obj = self.wallet.w3.eth.get_transaction(tx_hash)
+            except Exception:
+                pass
+            gas_price = 0
+            if tx_obj is not None:
+                gas_price = int(getattr(tx_obj, "effectiveGasPrice", 0) or tx_obj.get("gasPrice", 0) or 0)
+            gas_cost_native = gas_used * gas_price  # in wei
+
+            # Aggregate quote-side and base-side movement across BOTH vault and wallet,
+            # so vault-funded AND wallet-funded fills both produce a clear signal.
+            quote_out = (state_before["v_quote"] - state_after["v_quote"]) \
+                      + (state_before["w_quote"] - state_after["w_quote"])
+            quote_in  = -quote_out  # negative quote_out means quote came in
+            v_base_in = state_after["v_base"] - state_before["v_base"]
+            w_base_in = state_after["w_base"] - state_before["w_base"]
+            native_net = state_after["w_native"] - state_before["w_native"] + gas_cost_native  # back out gas
+            base_in_native = native_net if is_native else 0
+            base_in_total = v_base_in + w_base_in + (base_in_native if base_in_native > 0 else 0)
+            base_out_total = (state_before["v_base"] - state_after["v_base"]) \
+                           + (state_before["w_base"] - state_after["w_base"]) \
+                           + (-base_in_native if is_native and base_in_native < 0 else 0)
+
             fill_proven = False
             fill_summary = ""
             if side.lower() == "buy":
-                qd = vault_before["quote"] - vault_after["quote"]
-                bd = vault_after["base"] - vault_before["base"]
-                if qd > 0 or bd > 0:
+                # Buy: quote left wallet or vault AND base arrived somewhere.
+                if quote_out > 0 and base_in_total > 0:
                     fill_proven = True
-                    fill_summary = f"quote -{qd}, base +{bd}"
+                    fill_summary = f"quote -{quote_out}, base +{base_in_total}"
+                elif quote_out > 0 and base_in_total <= 0:
+                    print(f"[DreamDEX] ⚠️  BUY {symbol}: quote -{quote_out} reserved, base +0 — placed_unfilled (no match)")
+                    return {"status": "placed_unfilled", "tx_hash": tx_hash, "block": str(receipt.get("blockNumber")),
+                            "reserved": quote_out, "side": "buy"}
             else:
-                bd = vault_before["base"] - vault_after["base"]
-                qd = vault_after["quote"] - vault_before["quote"]
-                if bd > 0 or qd > 0:
+                # Sell: base left wallet or vault AND quote arrived.
+                if quote_in > 0 and base_out_total > 0:
                     fill_proven = True
-                    fill_summary = f"base -{bd}, quote +{qd}"
+                    fill_summary = f"base -{base_out_total}, quote +{quote_in}"
+                elif base_out_total > 0 and quote_in <= 0:
+                    print(f"[DreamDEX] ⚠️  SELL {symbol}: base -{base_out_total} reserved, quote +0 — placed_unfilled")
+                    return {"status": "placed_unfilled", "tx_hash": tx_hash, "block": str(receipt.get("blockNumber")),
+                            "reserved": base_out_total, "side": "sell"}
 
             if not fill_proven:
-                # Fallback: any log from pool contract — same heuristic as before but only when
-                # vault delta was zero (which is the wallet-funded path or a true silent reject).
+                # Neither side moved — true silent reject (or maybe wallet-funded with zero-side accounting).
                 logs = receipt.get("logs", []) or []
                 pool_addr_l = pool_addr_cs.lower()
                 pool_logs = [l for l in logs if str(getattr(l, "address", l.get("address", ""))).lower() == pool_addr_l]
                 if not pool_logs:
-                    print(f"[DreamDEX] ⚠️  status=1 but vault unchanged + no pool logs — silent reject")
+                    print(f"[DreamDEX] ⚠️  status=1 but no balance movement + no pool logs — silent reject")
                     return {"status": "silent_reject", "tx_hash": tx_hash}
-                print(f"[DreamDEX] ⚠️  vault unchanged but pool emitted logs — marking unverified")
+                print(f"[DreamDEX] ⚠️  no balance movement but pool emitted logs — marking unverified")
                 return {"status": "unverified", "tx_hash": tx_hash, "block": str(receipt.get("blockNumber"))}
 
-            print(f"[DreamDEX] ✅ {side.upper()} {qty} {symbol} confirmed via vault delta ({fill_summary}) "
+            print(f"[DreamDEX] ✅ {side.upper()} {qty} {symbol} confirmed ({fill_summary}) "
                   f"(block {receipt.get('blockNumber')})")
             return {
                 "status":      "success",
