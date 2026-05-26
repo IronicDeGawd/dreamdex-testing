@@ -3,39 +3,51 @@ import json, os, requests
 from config import OPENAI_API, OPENAI_MODEL, AGENT_CONFIDENCE_MIN, ENV
 
 SYSTEM_PROMPT = """
-You are a conservative crypto trading agent on DreamDEX (Somnia blockchain).
-You manage exactly $30 USDso. Your two goals in priority order:
-  1. PRESERVE CAPITAL — never let balance drop below $22
-  2. GENERATE VOLUME  — more transactions = better leaderboard position
+You are a trading agent on DreamDEX (Somnia mainnet) in a contest where
+leaderboard rank is driven primarily by **number of successful fills**, then
+PnL, then volume.
 
-Available pairs: WETH:USDso, WBTC:USDso, SOMI:USDso, USDC.e:USDso
-This is a SPOT exchange only. You can BUY (get base token) or SELL (back to USDso).
+You manage $50 USDso (the 'manual_balance' field is a planning placeholder, not
+a separate wallet). Your two goals in priority order:
+  1. MAXIMISE FILLS  — every fill = one leaderboard tick.
+  2. AVOID INVENTORY — every BUY that isn't followed by a SELL turns USDso
+     into a base token, which the leaderboard counts as a loss because PnL is
+     measured in USDso. So you MUST round-trip.
+
+Tradeable pairs on mainnet at the current $2 per-trade max:
+  - SOMI:USDso    — min order ~$0.17 (FAST tx grinder, smallest minimum)
+  - USDC.e:USDso  — min order ~$1.00 (stable peg, low risk)
+  - WETH:USDso    — min order ~$2.13  → STAYS OUT OF REACH at the $2 max.
+                    Do NOT pick this pair; it will silent-reject every time.
+  - WBTC:USDso    — min order ~$7.74  → STAYS OUT OF REACH. Do NOT pick.
 
 Hard rules you must never break:
-- Single trade max: $5 USDso
-- Single trade min: $0.10 USDso  
+- Allowed pairs ONLY: SOMI:USDso and USDC.e:USDso. Picking any other pair
+  burns gas with no fill — strictly forbidden.
+- Single trade max: $2.00 USDso
+- Single trade min: $0.20 USDso  (anything smaller hits minQuantity issues)
 - If USDso balance < $22: action must be "hold"
-- Max 3 open positions simultaneously
-- For tx count: use SOMI or USDC.e (gas is free on those pairs)
-- For real profit: use WETH or WBTC (more price movement)
-- Never buy if you already hold that asset and it's down >3%
+- ROUND-TRIP RULE: if your immediately previous successful action was a BUY of
+  pair X, the very next non-hold action MUST be a SELL of pair X. Only after
+  the round-trip is complete may you start a new BUY. This is non-negotiable —
+  it both adds a leaderboard fill AND restores your USDso.
 
-Strategy mix (follow this roughly):
-- 60% of actions: small $0.10-$0.50 trades on SOMI/USDC.e (free gas, tx count)
-- 30% of actions: medium $1-$3 trades on WETH (real volume + profit potential)
-- 10% of actions: hold (when uncertain or capital preservation needed)
+Strategy mix (follow this roughly across the next ~50 ticks):
+- 70%  small SOMI round-trips (BUY $0.30–$1.00 → SELL the same amount)
+- 25%  USDC.e round-trips ($1.00–$2.00, tiny PnL risk)
+- 5%   hold (only when you literally just sent a trade and want to wait one tick)
 
 Respond ONLY with valid JSON, no markdown, no explanation:
 {
   "action": "buy" | "sell" | "hold",
-  "pair": "WETH:USDso" | "WBTC:USDso" | "SOMI:USDso" | "USDC.e:USDso",
-  "amount_usdso": <float, how much USDso to spend or receive>,
-  "order_type": "market" | "limit",
-  "limit_price": <float or null>,
+  "pair":   "SOMI:USDso" | "USDC.e:USDso",
+  "amount_usdso": <float>,
+  "order_type": "market",
+  "limit_price": null,
   "reason": "<max 8 words>",
   "confidence": <integer 0-100>
 }
-If action is "hold", pair/amount/order_type can be null.
+If action is "hold", pair/amount may be null.
 """
 
 def decide(prices: dict, positions: dict, balances: dict,
@@ -143,32 +155,44 @@ def _build_prompt(prices, positions, balances, history, lb) -> str:
         for t in last_trades
     ]
 
+    # ROUND-TRIP HINT: find the most recent successful trade and tell the LLM
+    # what side it MUST take next. This is the strongest single signal we can
+    # give the model — without it the LLM keeps drifting back to "buy SOMI".
+    round_trip_hint = "  (no successful trades yet — start with a BUY of SOMI:USDso)"
+    for t in reversed(history):
+        if t.get('result', {}).get('status') == 'success':
+            act = t.get('action')
+            pair = t.get('pair', 'SOMI:USDso')
+            if act == 'buy':
+                round_trip_hint = f"  Last successful: BUY {pair}. Next MUST be SELL {pair} (round-trip)."
+            elif act == 'sell':
+                round_trip_hint = f"  Last successful: SELL {pair}. You may now start a fresh BUY (any allowed pair)."
+            break
+
     return f"""
-CURRENT PRICES (mid-price):
-  WETH:   ${prices.get('WETH:USDso',  {}).get('mid', 0):,.2f}  ({momentum.get('WETH:USDso',  0):+.2f}% / 30min)
-  WBTC:   ${prices.get('WBTC:USDso',  {}).get('mid', 0):,.2f}  ({momentum.get('WBTC:USDso',  0):+.2f}% / 30min)
+CURRENT PRICES (only tradeable pairs shown):
   SOMI:   ${prices.get('SOMI:USDso',  {}).get('mid', 0):.5f}  ({momentum.get('SOMI:USDso',  0):+.2f}% / 30min)
   USDC.e: ${prices.get('USDC.e:USDso',{}).get('mid', 0):.5f}  ({momentum.get('USDC.e:USDso',0):+.2f}% / 30min)
 
 MY BALANCES:
   USDso (free):   ${balances.get('usdso', 0):.4f}
-  WETH held:      {balances.get('weth',  0):.6f}
-  WBTC held:      {balances.get('wbtc',  0):.8f}
   SOMI held:      {balances.get('somi',  0):.4f}
   Total value:    ${balances.get('total', 0):.4f}
 
 OPEN POSITIONS ({len(positions)}/3 max):
 {chr(10).join(pos_lines) if pos_lines else '  None'}
 
+ROUND-TRIP STATE:
+{round_trip_hint}
+
 LEADERBOARD:
   My rank:   #{lb.get('my_rank', '?')} of {lb.get('total', 10)}
-  My txs:    {lb.get('my_tx', 0)}
-  #3 has:    {lb.get('third_tx', 0)} txs
-  Gap to #3: {lb.get('gap', 0)} txs
+  My fills:  {lb.get('my_tx', 0)}
   Signal:    {lb.get('signal', 'MAINTAIN')}
 
 LAST 5 DECISIONS:
 {chr(10).join(trade_lines) if trade_lines else '  None yet'}
 
-What should I do right now? Remember the 60/30/10 strategy mix.
+Decide my next action. Obey the ROUND-TRIP STATE above first — that takes
+precedence over every other heuristic.
 """
