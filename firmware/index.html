@@ -330,12 +330,18 @@ docker compose up -d</pre>
 
     <script>
         // -- Constants & State --
-        const BASE_URL = 'https://<TUNNEL_HOST>';
-        const CAPITAL_FLOOR = 22.00;
+        // BASE_URL auto-derives from the page origin so this dashboard works
+        // wherever the backend serves it. Override only for local file:// testing.
+        const BASE_URL = (window.location.protocol === 'http:' || window.location.protocol === 'https:')
+            ? window.location.origin
+            : 'https://<TUNNEL_HOST>';
+        const CAPITAL_FLOOR = 35.00;
         const INITIAL_SEED = 50.00;
-        
+
         const state = {
-            apiKey: '<FLASK_API_KEY>',
+            // First run reads from localStorage; the lock-icon modal lets you paste
+            // your real FLASK_API_KEY (saved to localStorage so it persists).
+            apiKey: localStorage.getItem('DREAMDEX_API_KEY') || '<FLASK_API_KEY>',
             logs: JSON.parse(localStorage.getItem('DREAMDEX_LOGS') || '[]'),
             priceHistory: {}, // { "pair": [2100, 2101, ...] } max 24
             
