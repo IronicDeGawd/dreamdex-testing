@@ -1,12 +1,17 @@
 # backend/server.py
-from flask import Flask, jsonify, request, abort
+import os
+from flask import Flask, jsonify, request, abort, send_from_directory
 from config import FLASK_HOST, FLASK_PORT, MY_ADDRESS, FLASK_API_KEY, ENV
 from monitor.prices      import PriceFeed
 from monitor.leaderboard import LeaderboardMonitor
 from monitor.portfolio   import Portfolio
 from trading.manual      import ManualTrader
 
-app = Flask(__name__)
+# Flask serves the static dashboard from backend/static/. The Lovable-generated
+# index.html lives in firmware/index.html (canonical copy) and is mirrored into
+# backend/static/ at sync time — see RUNBOOK § Dashboard updates.
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+app = Flask(__name__, static_folder=_STATIC_DIR, static_url_path="/assets")
 
 # ── C1 fix: shared-secret auth on every mutating endpoint ───────────
 # Flask binds to 0.0.0.0 so the ESP32 can reach it. Without auth, any
@@ -42,6 +47,13 @@ def init(agent, prices, lb, portfolio, manual):
             "FLASK_API_KEY env var is REQUIRED on mainnet (set a random string; "
             "set the same value in firmware/wifi_secrets.h as API_KEY)"
         )
+
+# ── Dashboard (single-page HTML control panel) ─────────────
+@app.route("/")
+def dashboard():
+    """Serves the single-page dashboard at https://<host>/."""
+    return send_from_directory(_STATIC_DIR, "index.html")
+
 
 # ── Endpoints the ESP32 calls ──────────────────────────────
 
