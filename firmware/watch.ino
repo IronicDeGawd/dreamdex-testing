@@ -415,7 +415,13 @@ void handleButtons() {
 void onUp() {
   switch (currentMenu) {
     case MENU_WIFI:
-      wifiScroll = (wifiScroll - 1 + max(wifiCount, 1)) % max(wifiCount, 1);
+      // When already connected, UP/DOWN navigates menus (no SSID list to scroll
+      // through anyway). When not connected, UP/DOWN scrolls the SSID list.
+      if (WiFi.status() == WL_CONNECTED) {
+        currentMenu = (Menu)(((int)currentMenu - 1 + MENU_COUNT) % MENU_COUNT);
+      } else {
+        wifiScroll = (wifiScroll - 1 + max(wifiCount, 1)) % max(wifiCount, 1);
+      }
       break;
     case MENU_PRICES:
     case MENU_AGENT:
@@ -436,7 +442,11 @@ void onUp() {
 void onDown() {
   switch (currentMenu) {
     case MENU_WIFI:
-      wifiScroll = (wifiScroll + 1) % max(wifiCount, 1);
+      if (WiFi.status() == WL_CONNECTED) {
+        currentMenu = (Menu)(((int)currentMenu + 1) % MENU_COUNT);
+      } else {
+        wifiScroll = (wifiScroll + 1) % max(wifiCount, 1);
+      }
       break;
     case MENU_PRICES:
     case MENU_AGENT:
