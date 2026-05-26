@@ -67,9 +67,17 @@ enum Menu {
 
 // ── Global state ─────────────────────────────────────────
 Menu          currentMenu   = MENU_PRICES;
-unsigned long lastFetch     = 0;
 unsigned long lastBtn       = 0;
-const int     FETCH_EVERY   = 10000;  // ms between data refreshes
+// Per-endpoint timers — staggered so only one HTTP call runs per loop iteration.
+// Keeps button responsiveness high (no single fetch blocks > one HTTP call's RTT).
+unsigned long lastFetchPrices     = 0;
+unsigned long lastFetchAgent      = 0;
+unsigned long lastFetchPortfolio  = 0;
+unsigned long lastFetchLeaderboard = 0;
+const int     FETCH_PRICES_EVERY      = 10000;  // 10s — sparkline cadence
+const int     FETCH_AGENT_EVERY       = 5000;   // 5s — most-watched
+const int     FETCH_PORTFOLIO_EVERY   = 30000;  // 30s — slow-moving
+const int     FETCH_LEADERBOARD_EVERY = 60000;  // 60s — slowest
 
 // Cached data strings — populated by fetch*() functions
 String priceWETH = "--", priceWBTC = "--", priceSOMI = "--";
@@ -176,10 +184,24 @@ void loop() {
   }
   wasConnected = connectedNow;
 
-  if (currentMenu != MENU_WIFI &&
-      millis() - lastFetch > FETCH_EVERY) {
-    fetchData();
-    lastFetch = millis();
+  // Staggered fetch — at most ONE HTTP call per loop iteration. Keeps button
+  // latency bounded by a single HTTP RTT instead of the sum of all 4 fetches.
+  // Skip entirely when on the WiFi screen (we don't show fetched data there).
+  if (currentMenu != MENU_WIFI && WiFi.status() == WL_CONNECTED) {
+    unsigned long now = millis();
+    if (now - lastFetchAgent > FETCH_AGENT_EVERY) {
+      fetchAgent();
+      lastFetchAgent = millis();
+    } else if (now - lastFetchPrices > FETCH_PRICES_EVERY) {
+      fetchPrices();
+      lastFetchPrices = millis();
+    } else if (now - lastFetchPortfolio > FETCH_PORTFOLIO_EVERY) {
+      fetchPortfolio();
+      lastFetchPortfolio = millis();
+    } else if (now - lastFetchLeaderboard > FETCH_LEADERBOARD_EVERY) {
+      fetchLeaderboard();
+      lastFetchLeaderboard = millis();
+    }
   }
 
   drawMenu();
@@ -778,6 +800,11 @@ bool httpBegin(HTTPClient& http, String url) {
   }
 }
 
+// HTTP timeouts kept short so a hung backend can't pin the loop for long.
+// CF tunnel + container backend typical p50: 100-300ms. p99 spikes to 2s.
+// 4s gives 10x headroom over p99 without making slow backends invisible.
+constexpr int HTTP_TIMEOUT_MS = 4000;
+
 String httpGet(String path) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.printf("[http] GET %s skipped — no WiFi\n", path.c_str());
@@ -788,12 +815,14 @@ String httpGet(String path) {
     Serial.printf("[http] GET %s begin() failed\n", path.c_str());
     return "{}";
   }
-  http.setTimeout(8000);   // CF tunnel has higher RTT than LAN
+  http.setTimeout(HTTP_TIMEOUT_MS);
   int    code = http.GET();
   String body = (code == 200) ? http.getString() : "{}";
   http.end();
   if (code != 200)
     Serial.printf("[http] GET %s → %d\n", path.c_str(), code);
+  // Service buttons immediately so a sequence of fetches doesn't queue presses.
+  handleButtons();
   return body;
 }
 
@@ -811,19 +840,22 @@ void httpPost(String path, String payload) {
   #ifdef API_KEY
     http.addHeader("X-API-Key", API_KEY);
   #endif
-  http.setTimeout(8000);
+  http.setTimeout(HTTP_TIMEOUT_MS);
   int code = http.POST(payload);
   http.end();
   if (code < 0)
     Serial.printf("[http] POST %s → %d\n", path.c_str(), code);
   else if (code == 401)
     Serial.printf("[http] POST %s → 401 (missing/bad API_KEY)\n", path.c_str());
+  handleButtons();
 }
 
 // ═════════════════════════════════════════════════════════
 // DATA FETCH
 // ═════════════════════════════════════════════════════════
 
+// Run all fetches sequentially — used once on initial WiFi connect.
+// Steady-state polling is staggered via the per-endpoint timers in loop().
 void fetchData() {
   fetchPrices();
   fetchAgent();
