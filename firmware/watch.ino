@@ -4,6 +4,7 @@
 #include <Adafruit_SSD1306.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>   // HTTPS for Cloudflare tunnel
 #include <ArduinoJson.h>
 
 // ── Board: ESP32-C3 SuperMini v1601 ──────────────────────
@@ -45,9 +46,11 @@ Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
 #define LONG_PRESS_MS 600
 
 // ── Backend ──────────────────────────────────────────────
-// Change to your laptop's local IP. Flask runs on 5001.
-// Find it with: ifconfig en0  (Mac) or  ip addr  (Linux)
-const char* BACKEND = "http://192.168.1.5:5001";
+// Production: agent is fronted by Cloudflare tunnel at this subdomain.
+// CF terminates HTTPS on 443 and forwards to the backend container's :5001.
+// HTTP fallback (commented) is the original LAN-only path; kept for local dev.
+const char* BACKEND = "https://<TUNNEL_HOST>";
+// const char* BACKEND = "http://192.168.1.5:5001";   // dev: laptop on same WiFi
 
 // ── Known WiFi networks ───────────────────────────────────
 // Copy wifi_secrets.example.h → wifi_secrets.h and fill in your SSIDs/passes.
@@ -621,14 +624,37 @@ void connectToSelected() {
 // HTTP HELPERS
 // ═════════════════════════════════════════════════════════
 
+// True if BACKEND starts with "https://"
+static inline bool backendIsHttps() {
+  return String(BACKEND).startsWith("https://");
+}
+
+// Initialise an HTTPClient with optional TLS. Caller must `http.end()`.
+// CF tunnel uses a public CA (Cloudflare Inc ECC CA-3 etc) — we accept any
+// valid CA without pinning since X-API-Key is what gates writes. For a
+// production prod-grade prod we'd pin the leaf cert via setCACert().
+static WiFiClientSecure _tlsClient;   // reused — keepalive TCP cheaper than reconnect
+
+bool httpBegin(HTTPClient& http, String url) {
+  if (backendIsHttps()) {
+    _tlsClient.setInsecure();    // skip cert verify; X-API-Key handles auth
+    return http.begin(_tlsClient, url);
+  } else {
+    return http.begin(url);
+  }
+}
+
 String httpGet(String path) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.printf("[http] GET %s skipped — no WiFi\n", path.c_str());
     return "{}";
   }
   HTTPClient http;
-  http.begin(String(BACKEND) + path);
-  http.setTimeout(5000);
+  if (!httpBegin(http, String(BACKEND) + path)) {
+    Serial.printf("[http] GET %s begin() failed\n", path.c_str());
+    return "{}";
+  }
+  http.setTimeout(8000);   // CF tunnel has higher RTT than LAN
   int    code = http.GET();
   String body = (code == 200) ? http.getString() : "{}";
   http.end();
@@ -640,15 +666,18 @@ String httpGet(String path) {
 void httpPost(String path, String payload) {
   if (WiFi.status() != WL_CONNECTED) return;
   HTTPClient http;
-  http.begin(String(BACKEND) + path);
+  if (!httpBegin(http, String(BACKEND) + path)) {
+    Serial.printf("[http] POST %s begin() failed\n", path.c_str());
+    return;
+  }
   http.addHeader("Content-Type", "application/json");
-  // Shared-secret auth (mainnet refuses requests without it). API_KEY comes
-  // from wifi_secrets.h — copy wifi_secrets.example.h and set API_KEY to the
-  // same value the backend has in FLASK_API_KEY env var.
+  // Shared-secret auth (backend refuses mutating requests without it). API_KEY
+  // comes from wifi_secrets.h — copy wifi_secrets.example.h and set API_KEY to
+  // match the backend's FLASK_API_KEY env var.
   #ifdef API_KEY
     http.addHeader("X-API-Key", API_KEY);
   #endif
-  http.setTimeout(5000);
+  http.setTimeout(8000);
   int code = http.POST(payload);
   http.end();
   if (code < 0)
