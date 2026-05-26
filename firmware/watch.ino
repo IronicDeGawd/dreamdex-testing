@@ -791,7 +791,13 @@ void connectToSelected() {
                   WiFi.RSSI());
     currentMenu = MENU_PRICES;
     fetchData();
-    lastFetch = millis();
+    // Seed all per-endpoint timers so the next loop tick doesn't immediately
+    // re-fire fetches we just ran. Replaces the old single lastFetch counter.
+    unsigned long now = millis();
+    lastFetchPrices      = now;
+    lastFetchAgent       = now;
+    lastFetchPortfolio   = now;
+    lastFetchLeaderboard = now;
   } else {
     Serial.printf("[wifi] FAILED  status=%d\n", WiFi.status());
     display.clearDisplay();
