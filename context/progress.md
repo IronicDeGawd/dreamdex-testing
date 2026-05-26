@@ -2,11 +2,20 @@
 
 ## Current Status
 
-**Deployed + smoke-tested on testnet 2026-05-26.** Agent is currently **paused** at 3 successful trades on testnet. Wallet has ~857 STT + ~49 USDso. All code reviewed for mainnet safety; all 15 audit findings (6 critical + 5 high + 4 medium) patched and committed. Server runs as a Docker Compose service on `user@<SERVER_HOST>` (Tailscale home server), fronted by Cloudflare tunnel `<TUNNEL_HOST>` → host `localhost:5001`.
+**Live on mainnet, agent running in PROFIT mode at rank #2 of 11.** Wallet $44.50 USDso + 16.5 SOMI native; 137 txns executed with 77 fills (~56% rate); $192+ volume; leaderboard PnL -$5.49 (real session cost ~$5 across fills). Dashboard now shows live liquidity breakdown, mode badge, activity log. Vault-funded buys never filled on dreamDEX mainnet (USDso reserved then refunded 5-10 min later) — switched to wallet funding. Auto-drain post-sell to prevent wallet runway bleed. Agent auto-flips grind→profit at rank ≤2 and back when rank >3. Two-sided vault-delta fill detection + nonce-drift recovery deployed.
 
-Stack: Python 3.11 + Flask + web3.py for the agent backend (Docker, `network_mode: host`); ESP32-C3 + SSD1306 OLED + 3-button UI for the watch; OpenAI gpt-4o-mini for the trading brain; dreamDEX REST API + SIWE auth for orders. Contest budget split: 30 USDso to agent, 20 USDso for manual trades.
+Stack: Python 3.11 + Flask + web3.py for the agent backend (Docker, `network_mode: host`); ESP32-C3 + SSD1306 OLED + 3-button UI for the watch; OpenAI gpt-4o-mini for the trading brain; dreamDEX REST API + SIWE auth for orders. Server on `user@<SERVER_HOST>` (Tailscale home server), fronted by Cloudflare tunnel `<TUNNEL_HOST>` → `localhost:5001`.
 
 ## Completed
+
+### 2026-05-26 18:00 — Live mainnet trading + dashboard rework (6 commits)
+- **Vault funding root cause:** vault-funded IOC buys on dreamDEX mainnet never fill. USDso gets reserved then refunded 5-10 min later; wallet-funded buys DO fill. Switched default to `funding=wallet`.
+- **Leaderboard PnL bleed:** formula counts ONLY wallet USDso (not vault, not native SOMI). Sells credit USDso to pool vault, silently bleeding wallet runway. Added auto-drain that withdraws quote vault back to wallet post-sell.
+- **Vault-delta rewrite:** now reads 5 balances (vault quote, vault base, wallet USDso, wallet base ERC20, wallet native SOMI), accounts for gas, requires TWO-sided movement to confirm fill. Single-side → new `placed_unfilled` status prevents phantom round-trip sells.
+- **Mode toggle + auto-flip:** GRIND maximizes volume (always trades), PROFIT only fires when 30-min momentum exceeds ±0.3%. Agent auto-flips grind→profit at rank ≤2, back to grind when rank >3.
+- **Brain bug fix:** TradingAgent created its own LeaderboardMonitor that was never `.start()`-ed, so rank check always saw "?". Now shares running monitor from `main.py`.
+- **Dashboard UX:** explicit liquidity breakdown table with per-row explanations (USDso wallet, vault, native SOMI, manual reserve); mode badge in agent controls; activity log streaming live decisions + fills + auto-flip events. Fixed two JS/CSS bugs that blanked the dashboard.
+- Commits: `36600c1` (fill detection), `680464e` (config defaults), `a21ad60` (mode toggle), `a8a42c7` (shared LB + auto-drain), `1d6b4c4` (dashboard), `127ca9f` (handover notes).
 
 ### 2026-05-26 — Live testnet rehearsal
 - Deployed Docker container, CF tunnel up, watch firmware re-flashed for HTTPS.
@@ -49,36 +58,41 @@ Stack: Python 3.11 + Flask + web3.py for the agent backend (Docker, `network_mod
 
 ## Lessons
 
-- **Cloudflare tunnel + Flask: bind to `0.0.0.0` OR use `network_mode: host`.** Bridged port-publish via Docker (`127.0.0.1:5001:5001`) refused to forward on this Ubuntu 24.04 box even though Docker said the container was healthy. Host network mode side-steps the issue.
-- **`docker compose config` prints `env_file` contents in plaintext** (incl. `OPENAI_KEY` + `TESTNET_PRIVATE_KEY`). Never run with shared screen / public logs.
-- **ESP32 HTTPS via WiFiClientSecure**: a shared file-scope client (`_tlsClient`) with `setInsecure()` is much faster than per-request handshake on the C3 — saves ~25 KB heap pressure and several hundred ms of TLS negotiation per call.
-- **CF tunnel adds real RTT** vs LAN. p50 100-300 ms, p99 ~2 s. HTTP timeouts must be set with this in mind (we use 4 s).
-- **dreamDEX trade success ≠ tx.status=1 + any pool log.** A vault-deposit log in the same block can fool the heuristic. Use **vault-balance delta** (pre vs post `getWithdrawableBalance`) as the authoritative signal. C4 fix.
-- **WBTC is 8 decimals on dreamDEX mainnet, not 18.** USDC.e is 6. Get this wrong and order quantities are off by orders of magnitude. The agent's MARKETS dict + `refresh_market_params` already encode this; verified vs research/dreamdex-contracts.md.
+- **Decimal field renames require careful testing.** The vault-delta refactor renamed `dec` → `decLog` in several places (balance reading, logging, gas accounting). Easy to miss a reference and silently pass wrong args to `Decimal()`. Always grep the old name to ensure full migration.
+- **CSS `.btn-active` state: `!important` may be needed.** If a global stylesheet has a stronger specificity on `:hover` or `:active`, literal hex color `#fff !important` can be necessary to force the active state to stay visible. Document non-obvious overrides inline.
+- **Vault-funded orders on dreamDEX mainnet never fill.** USDso gets reserved for ~5-10 min then refunded. Wallet-funded orders fill normally. The leaderboard PnL formula counts ONLY wallet USDso (not vault balance), so every profitable round-trip silently drains wallet runway. Always auto-drain vault to wallet post-sell on mainnet.
+- **Two-sided vault-delta is the fill confirmation signal, not single-side.** Vault quote can move from gas refunds or vault operations. Require BOTH quote AND base (or quote AND native) to move in the expected direction to call a trade "filled". Single-side movement → `placed_unfilled` status, preventing phantom sells.
+- **Shared monitor instead of per-agent LeaderboardMonitor.** If TradingAgent creates its own monitor without `.start()`, rank checks always see "?". Always share the main loop's running monitor via a passed-in reference, or make monitor instantiation + startup a pre-condition of agent init.
+- **Cloudflare tunnel + Flask: bind to `0.0.0.0` OR use `network_mode: host`.** Bridged port-publish via Docker refused to forward on Ubuntu 24.04 even though Docker said healthy. Host mode side-steps the issue.
+- **dreamDEX trade success ≠ tx.status=1 + any pool log.** A vault-deposit log in the same block can fool the heuristic. Use **vault-balance delta** (pre vs post `getWithdrawableBalance`) as the authoritative signal.
+- **WBTC is 8 decimals on dreamDEX mainnet, not 18.** USDC.e is 6. Order quantities are off by orders of magnitude if wrong. The agent's MARKETS dict + `refresh_market_params` already encode this; verified vs research/dreamdex-contracts.md.
 
 ## Resume From Here
 
-**State at end of 2026-05-26 PM session:** agent paused at 3 testnet trades; container running; tunnel live; firmware up to date on `main` (head `85f9f70`).
+**State at end of 2026-05-26 evening session:** agent **live on mainnet**, mode PROFIT (auto-flipped from grind), loop NORMAL (300s), unpaused. Rank #2 of 11 contestants. 137 txns, 77 fills (~56% fill rate), $192+ volume, wallet $44.50 USDso + 16.5 SOMI native, leaderboard PnL -$5.49. Container running on server `user@<SERVER_HOST>:~/dreamdex-agent/`, tunnel `<TUNNEL_HOST>` live. Firmware on `main` branch.
 
-### Next steps (user-driven)
+### Open follow-ups
 
-1. **(Optional) Re-flash the watch** so the latest UX pass (BAL LOW warning, sparklines, staggered fetches) is on the device. Arduino IDE → `firmware/watch.ino` → Upload. Re-flash needed only if the device is still running an older firmware.
-2. **(Optional) Resume testnet rehearsal** — press SELECT on watch Agent screen to unpause, or `curl -X POST -H "X-API-Key: ..." -d '{}' https://<TUNNEL_HOST>/agent/toggle`. Agent will resume on next 120s tick.
-3. **Mainnet day**:
-   - Move the 50 USDso contest seed to wallet `0xF4c825F3C2970153d78B407CF190861dd4E2b905`.
-   - SSH to server: `sed -i 's/^DREAMDEX_ENV=.*/DREAMDEX_ENV=mainnet/' ~/dreamdex-agent/.env && cd ~/dreamdex-agent && docker compose restart agent`.
-   - Confirm boot logs say `MAINNET mode`, wallet `0xF4c8…2b905`.
-   - Unpause agent from watch or via curl.
-4. **Post-contest teardown** — follow `RUNBOOK.md` § Post-contest teardown.
+1. **Container loop speed:** Currently set to NORMAL (300s = 5 min per trade cycle). User may want FST (120s) for higher volume attempt. Flip in watch Agent screen or via backend config if performance allows.
+2. **Profit mode test:** Just fired its first momentum trade (`BUY 80% • momentum down, buy the dip`). Observe next 1-2 hours whether it nets actual PnL vs GRIND baseline. If yes, keep PROFIT mode active; if no or unstable, revert to GRIND.
+3. **Watch firmware:** Dashboard UX and activity log are on latest `main` (head `127ca9f`). If user is still on older build, re-flash: Arduino IDE → `firmware/watch.ino` → Upload (optional, only if old firmware in use).
+
+### Post-session decision points
+
+- **Keep PROFIT mode or revert to GRIND?** Observe 1-2 hours of P&L and fill rates. If momentum trades consistently beat hold-out cost, keep it. Otherwise flip back.
+- **Increase loop speed to FST (120s)?** Would double trade frequency but may degrade fill rate and burn through capital faster. Watch rank trend first.
+- **Tweak momentum threshold (currently ±0.3%)?** If fills are too frequent or too rare, adjust `MOMENTUM_THRESHOLD` in backend config and watch the activity log.
 
 ### Critical state pointers
 
 | Thing | Where |
 |---|---|
-| Agent container | `user@<SERVER_HOST>:~/dreamdex-agent/` (Docker Compose) |
+| Agent container | `user@<SERVER_HOST>:~/dreamdex-agent/` (Docker Compose, mainnet) |
 | Public URL | `https://<TUNNEL_HOST>` |
-| Testnet wallet | `0xe21c64a04562D53EA6AfFeB1c1561e49397B42dd` (857 STT / 49 USDso) |
-| Mainnet wallet | `0xF4c825F3C2970153d78B407CF190861dd4E2b905` (empty until contest seed lands) |
-| API key | `FLASK_API_KEY` in server `.env`, `#define API_KEY` in `firmware/wifi_secrets.h` — never commit |
-| Watch firmware HEAD | `85f9f70` |
-| Runbook | `RUNBOOK.md` at project root |
+| Mainnet wallet | `0xF4c825F3C2970153d78B407CF190861dd4E2b905` ($44.50 USDso + 16.5 SOMI) |
+| Loop speed | NORMAL (300s) — flip in watch or backend config |
+| Mode | PROFIT (auto-flips grind↔profit by rank) |
+| Rank | #2 of 11 |
+| API key | `FLASK_API_KEY` in server `.env`, `#define API_KEY` in `firmware/wifi_secrets.h` |
+| Watch firmware HEAD | `127ca9f` (post-dashboard commit) |
+| Runbook | `RUNBOOK.md` at project root (includes teardown) |

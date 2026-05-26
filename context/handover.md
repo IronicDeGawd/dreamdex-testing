@@ -20,28 +20,43 @@ No uncommitted edits at session end.
 
 ## Session Notes
 
-**Status:** agent **paused** at 3 successful testnet trades. Container running. Tunnel live. Watch firmware ready (re-flash if older than `85f9f70`).
+**Status (2026-05-26 evening):** agent **running**, mode **PROFIT** (auto-flipped at rank ≤ 2), loop 300s (NORMAL — reset on container restart; flip to fast via /agent/speed if desired).
 
-**Wallet snapshot:**
-- Testnet `0xe21c64…42dd`: 857 STT, 49 USDso
-- Mainnet `0xF4c8…2b905`: 0 / 0 (awaiting contest seed)
+**Live leaderboard:** rank **#2/11**, txCount 137, fills 77 (~56% rate), volume **$192+**, wallet $44.50, native 16.5 SOMI, contest PnL −$5.49.
 
-**Hot path commands** (memorise or alias):
+**Hot path commands (auth = `X-API-Key: $FLASK_API_KEY` — see server `.env`):**
 ```bash
-# Status (no auth)
-curl https://<TUNNEL_HOST>/agent | jq
-
-# Toggle pause/resume (auth)
-curl -X POST -H "X-API-Key: <see backend/.env FLASK_API_KEY>" \
-  -H "Content-Type: application/json" -d '{}' \
-  https://<TUNNEL_HOST>/agent/toggle
-
-# Server logs
-ssh user@<SERVER_HOST> 'cd ~/dreamdex-agent && docker compose logs -f agent'
-
-# Restart service (after .env edit)
-ssh user@<SERVER_HOST> 'cd ~/dreamdex-agent && docker compose restart agent'
+# Mode flip (auto-flips at rank ≤ 2)
+curl -X POST -H "X-API-Key: $K" -H 'content-type: application/json' \
+  -d '{"mode":"profit"}' https://<TUNNEL_HOST>/agent/mode
+# Drain vault USDso back to wallet (recover stuck funds)
+ssh user@<SERVER_HOST> 'docker exec dreamdex-agent python3 /app/drain_now.py'
+# Force-recreate container (must after env_file edits)
+ssh user@<SERVER_HOST> 'cd ~/dreamdex-agent && docker compose up -d --force-recreate --build'
 ```
+
+**Big code changes shipped this session (all on `main` working tree; not yet committed):**
+- `trading/dreamdex.py` — vault_delta rewritten: 5-balance read (vault quote/base + wallet USDso/base/native), 3s settlement delay, gas-aware, two-sided movement required → fill_proven, single-side → new `placed_unfilled` status. Default buy buffer +1→+5 ticks (empirical: +1 doesn't cross on mainnet).
+- `trading/wallet.py` — auto-retry once on `nonce too low` (handles docker-exec races).
+- `config.py` — `AGENT_FUNDING_SOURCE=wallet` (vault-funded buys don't fill), `AGENT_STOP_BELOW=35.0`, `AGENT_MAX_TRADE=5.0`.
+- `agent/brain.py` — split prompts: `GRIND_PROMPT` (volume) + `PROFIT_PROMPT` (momentum, hold-by-default). Runtime `set_mode/get_mode`.
+- `agent/agent.py` — auto-flip rank≤2 runs FIRST in `_tick` (before capital-floor return). Affordability check before vault deposits. Auto-drain quote vault after every successful SELL.
+- `main.py` — `TradingAgent(portfolio=…, lb=…)` shares the *running* LB monitor (prev bug: agent had its own that was never `.start()`-ed, so `my_rank` was always "?").
+- `monitor/leaderboard.py` — `get_my_stats` now exposes `my_volume`, `my_fills`, `my_pnl`, `my_balance`.
+- `server.py` — new `/agent/mode` GET/POST.
+- `static/index.html` — explicit Liquidity Breakdown table (Wallet/Vault/Native/Manual reserve, each with one-line explainer), Mode buttons (GRIND/PROFIT), activity log surfaces brain decisions + tx_count deltas + mode flips. Fixed `theme()` not resolving in plain `<style>` → hardcoded `#e5e5e5`/`#0a0a0a` with `!important` on `.btn-active`. Renamed `const dec` → `decLog` to avoid clash with existing block.
+
+**Hard-won gotchas (don't re-discover):**
+- **Leaderboard PnL = wallet USDso − $50.** Vault USDso + native SOMI DON'T count. Auto-drain after sells is mandatory or wallet bleeds.
+- **Vault-funded IOC buys evaporate $ for 5–10 min then refund.** Wallet-funded fills cleanly. Default funding must be `wallet`.
+- **dreamDEX OrderPlaced log shows `filled=0` even on actual fills** — they emit the event before the in-block match settles. Trust vault/wallet deltas, not the event.
+- **Container rebuild resets agent state** (speed/mode env defaults, in-memory history). Re-set speed after every restart.
+- **Auto-flip needs SHARED LB monitor** (R6 fix); standalone `LeaderboardMonitor()` never starts polling without `.start()`.
+
+**Open follow-ups:**
+- Commit the session's edits (`git add -A && git commit` — files in flight cover all of `trading/`, `agent/`, `config.py`, `main.py`, `monitor/leaderboard.py`, `server.py`, `static/index.html`).
+- Loop is at NORMAL (300s); user may want FST (120s) for higher volume gen.
+- Profit-mode brain made its first real momentum trade (`BUY 80% • momentum down, buy the dip`) — let it run, observe whether PnL recovers.
 
 ## Hot gotchas (already encoded into the code — don't re-discover)
 
