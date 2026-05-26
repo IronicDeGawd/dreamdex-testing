@@ -50,9 +50,11 @@ class LeaderboardMonitor:
             #   [{"address","tx_count"}, ...]
             #   {"leaderboard":[...]}
             #   {"entries":[...]}  /  {"data":[...]}
+            #   {"traders":[...]}  ← real shape from
+            #     https://dreamdex-leaderboard-super-cool.vercel.app/api/leaderboard
             lb = data
             if isinstance(data, dict):
-                for key in ("leaderboard", "entries", "data", "results"):
+                for key in ("traders", "leaderboard", "entries", "data", "results"):
                     if key in data and isinstance(data[key], list):
                         lb = data[key]; break
             if not isinstance(lb, list):

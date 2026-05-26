@@ -22,7 +22,7 @@ MANUAL_CAPITAL  = 20.0
 
 # ── Agent Risk Rules ──────────────────────────────────────
 AGENT_MIN_TRADE      = 0.10
-AGENT_MAX_TRADE      = 5.0
+AGENT_MAX_TRADE      = 2.0
 AGENT_STOP_BELOW     = 22.0
 AGENT_CONFIDENCE_MIN = 65
 MAX_CONCURRENT_POS   = 3
@@ -53,7 +53,7 @@ FLASK_API_KEY = os.environ.get("FLASK_API_KEY", "")
 # The competition leaderboard lives on mainnet regardless of which network
 # the bot is currently trading on. We pin both the URL and the address that's
 # looked up so testnet runs still surface our mainnet standing.
-LEADERBOARD_URL     = "https://dreamdex-leaderboard.vercel.app/api/leaderboard"
+LEADERBOARD_URL     = "https://dreamdex-leaderboard-super-cool.vercel.app/api/leaderboard"
 LEADERBOARD_ADDRESS = "0xF4c825F3C2970153d78B407CF190861dd4E2b905"  # mainnet wallet
 
 # ═══════════════════════════════════════════════════════════
