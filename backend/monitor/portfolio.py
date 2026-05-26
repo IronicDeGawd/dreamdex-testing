@@ -52,6 +52,14 @@ class Portfolio:
         self.running = False
 
     def start(self):
+        # Synchronous first refresh so agent's first tick has on-chain data to
+        # gate its capital-floor check against (C2). Without this, the first
+        # tick would see last_refresh=0 and hold ("portfolio stale") — fine
+        # but noisy.
+        try:
+            self._refresh()
+        except Exception as e:
+            print(f"[Portfolio] initial refresh failed: {e}")
         self.running = True
         threading.Thread(target=self._loop, daemon=True).start()
         print("[Portfolio] Started balance tracker")
@@ -72,16 +80,25 @@ class Portfolio:
         me    = Web3.to_checksum_address(MY_ADDRESS)
         usdso = Web3.to_checksum_address(USDSO_ADDRESS)
 
+        # H4: divide by the pool's actual quoteDecimals, not a hardcoded 1e18.
+        # USDso is 18d today but the pattern would silently break a base-token
+        # vault check on WBTC (8d) or USDC.e (6d).
+        # USDso's own decimals come from any pool's quoteDecimals (they're identical).
+        usdso_decimals = 18
+        for _mkt in MARKETS.values():
+            usdso_decimals = int(_mkt.get("quoteDecimals", 18))
+            break
+
         # Wallet ERC-20 USDso balance
         erc20 = self.w3.eth.contract(address=usdso, abi=ERC20_ABI)
         try:
             wallet_raw = erc20.functions.balanceOf(me).call()
-            wallet_usdso = wallet_raw / 1e18
+            wallet_usdso = wallet_raw / (10 ** usdso_decimals)
         except Exception as e:
             print(f"[Portfolio] balanceOf error: {e}")
             wallet_usdso = 0.0
 
-        # Vault balances per pool
+        # Vault balances per pool (USDso side — quoteDecimals scaling)
         vault_totals: dict[str, float] = {}
         for pair, mkt in MARKETS.items():
             try:
@@ -89,7 +106,7 @@ class Portfolio:
                     address=Web3.to_checksum_address(mkt["contract"]), abi=VAULT_ABI
                 )
                 raw = pool.functions.getWithdrawableBalance(me, usdso).call()
-                vault_totals[pair] = raw / 1e18
+                vault_totals[pair] = raw / (10 ** int(mkt.get("quoteDecimals", 18)))
             except Exception as e:
                 vault_totals[pair] = 0.0
 
@@ -98,11 +115,12 @@ class Portfolio:
 
         with self._lock:
             self._stats = {
-                "agent_balance":  total_usdso,          # approximation — full tracking needs positions
+                "agent_balance":  total_usdso,          # USDso wallet + all vault USDso (single source of truth)
                 "manual_balance": MANUAL_CAPITAL,        # kept constant (user tracks manually)
                 "total_value":    total_usdso + MANUAL_CAPITAL,
                 "usdso_wallet":   wallet_usdso,
                 "usdso_vaults":   vault_totals,
+                "last_refresh":   time.time(),           # C2: agent uses this to detect stale data
             }
 
     def summary(self) -> dict:

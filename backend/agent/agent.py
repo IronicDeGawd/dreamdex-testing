@@ -2,7 +2,8 @@
 import time, threading, json
 from datetime import datetime
 from config import (AGENT_LOOP_SECONDS, AGENT_STOP_BELOW,
-                    AGENT_MIN_TRADE, AGENT_MAX_TRADE, AGENT_MAX_ORDERS)
+                    AGENT_MIN_TRADE, AGENT_MAX_TRADE, AGENT_MAX_ORDERS,
+                    MAX_CONCURRENT_POS)
 from agent.brain     import decide
 from agent.strategy  import PriceAnalyzer
 from agent.state     import AgentState
@@ -11,11 +12,12 @@ from monitor.leaderboard import LeaderboardMonitor
 
 
 class TradingAgent:
-    def __init__(self):
+    def __init__(self, portfolio=None):
         self.analyzer       = PriceAnalyzer()
         self.state          = AgentState()
         self.dex            = DreamDEX()
         self.lb             = LeaderboardMonitor()
+        self.portfolio      = portfolio  # C2: source of truth for capital-floor check
         self.running        = False
         self.paused         = False
         self.loop_secs      = AGENT_LOOP_SECONDS
@@ -81,10 +83,26 @@ class TradingAgent:
             }
             return
 
-        # 1. Safety check
+        # 1. Capital-floor safety check (C2 fix: use on-chain Portfolio truth,
+        #    not local AgentState which drifts on silent rejects + mid-vs-fill).
+        #    Falls back to local state only if Portfolio is missing — never on mainnet.
+        chain_usdso = None
+        if self.portfolio is not None:
+            stats = self.portfolio.summary()
+            chain_usdso = stats.get("agent_balance")
+            last_ref = stats.get("last_refresh", 0)
+            # Hold if portfolio is stale (>120s since last successful refresh)
+            if last_ref and time.time() - last_ref > 120:
+                print(f"[agent] ⚠️  Portfolio stale ({int(time.time() - last_ref)}s) — holding")
+                self.last_decision = {
+                    "action": "hold", "reason": "portfolio stale",
+                    "confidence": 100, "time": _now()
+                }
+                return
         balances = self.state.balances()
-        if balances["usdso"] < AGENT_STOP_BELOW:
-            print(f"[agent] ⚠️  Balance ${balances['usdso']:.2f} below floor — holding")
+        usdso_for_floor = chain_usdso if chain_usdso is not None else balances["usdso"]
+        if usdso_for_floor <= AGENT_STOP_BELOW:   # L1 fix: <=, not <, so $22 itself blocks
+            print(f"[agent] ⚠️  USDso ${usdso_for_floor:.2f} <= floor ${AGENT_STOP_BELOW:.2f} — holding")
             self.last_decision = {
                 "action": "hold", "reason": "capital floor hit",
                 "confidence": 100, "time": _now()
@@ -119,6 +137,12 @@ class TradingAgent:
         action    = decision.get("action")
         amt_usdso = float(decision.get("amount_usdso", AGENT_MIN_TRADE))
 
+        # C3: enforce MAX_CONCURRENT_POS in code (the LLM prompt alone isn't a guarantee).
+        # Only blocks new BUYs — sells can always close positions.
+        if action == "buy" and len(self.state.open_positions()) >= MAX_CONCURRENT_POS:
+            print(f"[agent] ⚠️  {len(self.state.open_positions())} positions open >= MAX_CONCURRENT_POS={MAX_CONCURRENT_POS} — skipping buy")
+            return
+
         # Clamp
         amt_usdso = max(AGENT_MIN_TRADE, min(AGENT_MAX_TRADE, amt_usdso))
 
@@ -141,7 +165,14 @@ class TradingAgent:
             lot     = float(mkt.get("lotSize", 0.0001))
             min_qty = float(mkt.get("minQuantity", 0.001))
             qty = round(round(qty / lot) * lot, 8)
+            # M3: if bumping to min_qty would exceed AGENT_MAX_TRADE in USDso terms,
+            # skip the trade rather than silently overshooting. e.g. WBTC minQty
+            # costs ~$7.69 — if LLM said "$0.10 trade", we'd be 77× over.
             if qty < min_qty:
+                min_qty_usdso = min_qty * mid
+                if min_qty_usdso > AGENT_MAX_TRADE:
+                    print(f"[agent] ⚠️  {pair} min qty {min_qty} costs ~${min_qty_usdso:.2f} > AGENT_MAX_TRADE ${AGENT_MAX_TRADE} — skipping")
+                    return
                 qty = min_qty
         except Exception as e:
             print(f"[agent] Error snapping qty: {e}")
@@ -176,16 +207,27 @@ class TradingAgent:
                 pool = self.dex.wallet.w3.eth.contract(address=pool_addr, abi=vault_abi)
 
                 if action == "buy":
+                    # C5: size deposit at the SAME price the order will use (best ask + tick),
+                    # not mid*1.15 — that buffer is wildly over-conservative AND wrong when
+                    # the book is thin (real ask can be > mid*1.15). Match place_order logic.
                     tick = float(mkt.get("tickSize", 0.0001))
-                    limit_price = round(round((mid * 1.15) / tick) * tick, 6)
+                    book = self.dex.get_orderbook(pair)
+                    best_ask = book.get("ask") or 0
+                    if best_ask:
+                        raw_price = best_ask + tick
+                    else:
+                        # Empty book — order will reject anyway, but estimate from mid for the deposit.
+                        raw_price = mid + tick
+                    limit_price = round(round(raw_price / tick) * tick, 6)
 
                     decimals = mkt["quoteDecimals"]
-                    raw_needed = int(qty * limit_price * (10 ** decimals))
+                    # Add 2% buffer for slippage between deposit and execution (down from 15%).
+                    raw_needed = int(qty * limit_price * 1.02 * (10 ** decimals))
                     raw_bal = pool.functions.getWithdrawableBalance(self.dex.wallet.address, quote_addr).call()
                     if raw_bal < raw_needed:
                         deficit = (raw_needed - raw_bal) / (10 ** decimals)
                         deficit = round(deficit * 1.01, 4)
-                        print(f"[agent] Vault deficit for buy (at limit price {limit_price}): {deficit} USDso. Depositing...")
+                        print(f"[agent] Vault deficit for buy (limit {limit_price}, 2% buf): {deficit} USDso. Depositing...")
                         self.dex.vault_deposit(pair, mkt["quote"], deficit)
                 elif action == "sell":
                     decimals = mkt["baseDecimals"]
@@ -212,8 +254,9 @@ class TradingAgent:
         # Log
         log_entry = {**decision, "qty": qty, "result": result, "mid": mid}
         self._log(log_entry)
-        # Only mutate local state on confirmed on-chain success. silent_reject
-        # and error results must not inflate balances/positions/tx-count.
+        # Only mutate local state on vault-delta-PROVEN success. silent_reject,
+        # unverified, reverted, error all skip — they either didn't move money
+        # or can't be authoritatively confirmed.
         if result.get("status") == "success":
             self.state.record_trade(log_entry)
         else:

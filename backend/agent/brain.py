@@ -1,6 +1,6 @@
 # backend/agent/brain.py
 import json, os, requests
-from config import OPENAI_API, OPENAI_MODEL, AGENT_CONFIDENCE_MIN
+from config import OPENAI_API, OPENAI_MODEL, AGENT_CONFIDENCE_MIN, ENV
 
 SYSTEM_PROMPT = """
 You are a conservative crypto trading agent on DreamDEX (Somnia blockchain).
@@ -44,8 +44,19 @@ def decide(prices: dict, positions: dict, balances: dict,
     Ask GPT-4o-mini what to do right now.
     Returns parsed decision dict or {"action": "hold"} on error.
     """
-    if not os.environ.get("OPENAI_KEY"):
-        # Rule-based fallback for testing connectivity and end-to-end flow without OpenAI key
+    openai_key = os.environ.get("OPENAI_KEY", "")
+    if not openai_key or openai_key == "disable":
+        # M1: on mainnet, rule-based fallback is dangerous (real-money trades at
+        # confidence=100, bypassing the confidence gate). main.py refuses to start
+        # without OPENAI_KEY=<real|disable> on mainnet, so we only reach here on
+        # mainnet if the operator explicitly set OPENAI_KEY=disable.
+        # On testnet, fallback is fine — useful for connectivity testing.
+        if ENV == "mainnet":
+            # Always hold on mainnet fallback. Operator opted into degraded mode
+            # but we still refuse to fire blind real-money trades.
+            return {"action": "hold", "reason": "no LLM key on mainnet", "confidence": 100}
+        # Testnet fallback — same as before but with confidence below the gate
+        # so it doesn't override safety paths (gate is AGENT_CONFIDENCE_MIN=65).
         if positions:
             for pair, pos in positions.items():
                 if pos.get("qty", 0) > 0:
@@ -57,7 +68,7 @@ def decide(prices: dict, positions: dict, balances: dict,
                         "order_type": "market",
                         "limit_price": None,
                         "reason": "fallback sell holding",
-                        "confidence": 100
+                        "confidence": 100,  # testnet only
                     }
         return {
             "action": "buy",
@@ -66,7 +77,7 @@ def decide(prices: dict, positions: dict, balances: dict,
             "order_type": "market",
             "limit_price": None,
             "reason": "fallback buy SOMI",
-            "confidence": 100
+            "confidence": 100,  # testnet only
         }
 
     user_msg = _build_prompt(prices, positions, balances, history, leaderboard)

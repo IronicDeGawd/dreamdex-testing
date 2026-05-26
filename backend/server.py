@@ -1,12 +1,29 @@
 # backend/server.py
-from flask import Flask, jsonify, request
-from config import FLASK_HOST, FLASK_PORT, MY_ADDRESS
+from flask import Flask, jsonify, request, abort
+from config import FLASK_HOST, FLASK_PORT, MY_ADDRESS, FLASK_API_KEY, ENV
 from monitor.prices      import PriceFeed
 from monitor.leaderboard import LeaderboardMonitor
 from monitor.portfolio   import Portfolio
 from trading.manual      import ManualTrader
 
 app = Flask(__name__)
+
+# ── C1 fix: shared-secret auth on every mutating endpoint ───────────
+# Flask binds to 0.0.0.0 so the ESP32 can reach it. Without auth, any
+# device on the same WiFi can POST /manual and trigger a mainnet trade.
+# Watch firmware sends FLASK_API_KEY as X-API-Key header.
+def require_api_key():
+    """Abort with 401 if request doesn't carry a valid X-API-Key header.
+    Mainnet: refuses if FLASK_API_KEY env var is empty (see init).
+    Testnet with no key: dev mode — auth disabled."""
+    if not FLASK_API_KEY:
+        # Testnet dev mode: no key configured. Auth disabled. Mainnet
+        # refuses to start without a key (see init()) so this branch is
+        # safe on mainnet.
+        return
+    supplied = request.headers.get("X-API-Key", "")
+    if supplied != FLASK_API_KEY:
+        abort(401, description="missing or invalid X-API-Key")
 
 # These are injected from main.py
 _agent    = None
@@ -19,6 +36,12 @@ def init(agent, prices, lb, portfolio, manual):
     global _agent, _prices, _lb, _portfolio, _manual
     _agent=agent; _prices=prices; _lb=lb
     _portfolio=portfolio; _manual=manual
+    # C1: refuse mainnet start with empty key — fail closed instead of fail open.
+    if ENV == "mainnet" and not FLASK_API_KEY:
+        raise RuntimeError(
+            "FLASK_API_KEY env var is REQUIRED on mainnet (set a random string; "
+            "set the same value in firmware/wifi_secrets.h as API_KEY)"
+        )
 
 # ── Endpoints the ESP32 calls ──────────────────────────────
 
@@ -44,7 +67,8 @@ def leaderboard():
 
 @app.route("/manual", methods=["POST"])
 def manual_trade():
-    """ESP32 button triggers a manual trade"""
+    """ESP32 button triggers a manual trade. AUTHED."""
+    require_api_key()
     data = request.json
     # data = {"pair": "WETH:USDso", "side": "buy", "amount_usdso": 2.0}
     result = _manual.execute(
@@ -57,14 +81,16 @@ def manual_trade():
 
 @app.route("/agent/speed", methods=["POST"])
 def set_speed():
-    """ESP32 config menu changes agent speed"""
+    """ESP32 config menu changes agent speed. AUTHED."""
+    require_api_key()
     speed = request.json.get("speed", "normal")
     _agent.set_speed(speed)
     return jsonify({"ok": True, "speed": speed})
 
 @app.route("/agent/toggle", methods=["POST"])
 def toggle_agent():
-    """Pause or resume agent"""
+    """Pause or resume agent. AUTHED."""
+    require_api_key()
     if _agent.paused:
         _agent.resume()
         return jsonify({"status": "resumed"})
@@ -74,14 +100,16 @@ def toggle_agent():
 
 @app.route("/agent/max_orders", methods=["POST"])
 def set_max_orders():
-    """ESP32 config menu sets the order budget (0 = unlimited)"""
+    """ESP32 config menu sets the order budget (0 = unlimited). AUTHED."""
+    require_api_key()
     n = int(request.json.get("max_orders", 0))
     _agent.set_max_orders(n)
     return jsonify({"ok": True, "max_orders": _agent.max_orders})
 
 @app.route("/vault/deposit", methods=["POST"])
 def vault_deposit():
-    """Deposit funds into the SpotPool vault"""
+    """Deposit funds into the SpotPool vault. AUTHED."""
+    require_api_key()
     data = request.json
     try:
         tx_hash = _manual.dex.vault_deposit(
@@ -95,7 +123,8 @@ def vault_deposit():
 
 @app.route("/vault/withdraw", methods=["POST"])
 def vault_withdraw():
-    """Withdraw funds from the SpotPool vault"""
+    """Withdraw funds from the SpotPool vault. AUTHED."""
+    require_api_key()
     data = request.json
     try:
         tx_hash = _manual.dex.vault_withdraw(

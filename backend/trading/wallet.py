@@ -12,6 +12,7 @@ Direct contract calls are used as fallback / for vault deposit/withdraw.
 import os
 import time
 import json
+import threading
 import requests
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -23,12 +24,49 @@ class SomniaWallet:
     def __init__(self):
         self.address     = MY_ADDRESS
         self.chain_id    = CHAIN_ID
-        self.private_key = _CONFIG_KEY  # your Ethereum wallet private key (0x-prefixed), set via TESTNET_PRIVATE_KEY or MAINNET_PRIVATE_KEY
+        self.private_key = _CONFIG_KEY  # set via TESTNET_PRIVATE_KEY or MAINNET_PRIVATE_KEY env var
         self.w3          = Web3(Web3.HTTPProvider(SOMNIA_RPC))
-        self._nonce_cache: int | None = None
+        # H3 fix: local nonce counter. Prevents multi-tx flows (approve → deposit → order)
+        # from racing on `eth_getTransactionCount("pending")` when the RPC's pending pool
+        # hasn't propagated between calls — that race silently drops the second tx.
+        self._nonce: int | None = None
+        self._nonce_lock = threading.Lock()
 
         if not self.private_key:
             print(f"[wallet] ⚠️  Wallet key not set — set {'MAINNET' if 'mainnet' in SOMNIA_RPC else 'TESTNET'}_PRIVATE_KEY")
+
+    # ── Nonce management (H3) ─────────────────────────────────────────
+    def reserve_nonce(self) -> int:
+        """Return the next nonce to use AND increment the cached counter.
+        Falls back to chain query on first use or after a reset."""
+        with self._nonce_lock:
+            if self._nonce is None:
+                self._nonce = self.w3.eth.get_transaction_count(self.address, "pending")
+            n = self._nonce
+            self._nonce += 1
+            return n
+
+    def reset_nonce(self):
+        """Force a fresh chain query on the next reserve_nonce() call.
+        Use after a tx fails so we don't burn nonces on dropped txs."""
+        with self._nonce_lock:
+            self._nonce = None
+
+    # ── Gas pricing (M3) ──────────────────────────────────────────────
+    def _gas_fields(self) -> dict:
+        """Returns EIP-1559 fields if the node supports them, else legacy gasPrice.
+        EIP-1559 lets txs compete properly under congestion."""
+        try:
+            base_fee = self.w3.eth.get_block("latest").get("baseFeePerGas")
+            if base_fee:
+                priority = self.w3.eth.max_priority_fee
+                return {
+                    "maxFeePerGas":         int(base_fee * 2 + priority),  # generous; unused refunded
+                    "maxPriorityFeePerGas": int(priority),
+                }
+        except Exception:
+            pass
+        return {"gasPrice": self.w3.eth.gas_price}
 
     # ── Send a pre-built unsigned tx dict returned by DreamDEX API ────
     def send_unsigned_tx(self, tx: dict) -> str:
@@ -37,31 +75,45 @@ class SomniaWallet:
           { "to": "0x...", "data": "0x...", "value": "0", "gasLimit": "250000" }
         Returns tx hash string.
         """
-        nonce = self.w3.eth.get_transaction_count(self.address, "pending")
-        # The API's gasLimit estimate is often within ~5K of the matcher's
-        # actual consumption. SpotPool matcher also has internal gas-headroom
-        # checks (cf. gasBufferBps in stop registry) — observed custom revert
-        # at gasUsed=985K with gasLimit=1M. Use 3M floor + 2x buffer; unused
-        # gas is refunded so generous is cheap.
+        nonce = self.reserve_nonce()
         api_gas = int(tx.get("gasLimit", 300_000))
         gas = max(3_000_000, int(api_gas * 2))
-        signed_tx = Account.sign_transaction(
-            {
-                "to":       Web3.to_checksum_address(tx["to"]),
-                "data":     tx.get("data", "0x"),
-                "value":    int(tx.get("value", 0)),
-                "gas":      gas,
-                "gasPrice": self.w3.eth.gas_price,
-                "nonce":    nonce,
-                "chainId":  self.chain_id,
-            },
-            self.private_key,
-        )
-        sent = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        return sent.hex()
+        tx_fields = {
+            "to":      Web3.to_checksum_address(tx["to"]),
+            "data":    tx.get("data", "0x"),
+            "value":   int(tx.get("value", 0)),
+            "gas":     gas,
+            "nonce":   nonce,
+            "chainId": self.chain_id,
+            **self._gas_fields(),
+        }
+        try:
+            signed_tx = Account.sign_transaction(tx_fields, self.private_key)
+            sent = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            return sent.hex()
+        except Exception:
+            # If sign/send fails, the nonce we reserved was burnt — re-sync from chain.
+            self.reset_nonce()
+            raise
 
-    def wait_for_receipt(self, tx_hash: str, timeout: int = 30) -> dict:
+    def wait_for_receipt(self, tx_hash: str, timeout: int = 120) -> dict:
+        """L2 fix: bumped 30→120s for mainnet congestion. A timeout here returns
+        an error to the caller but the tx may still confirm — caller should
+        save the hash and re-check next tick."""
         return self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
+
+    def sign_and_send(self, tx: dict) -> str:
+        """Sign + broadcast a pre-built tx dict (from a contract .build_transaction()
+        call). Wraps in try/except so a failed send doesn't burn a nonce permanently —
+        we reset the cached nonce and re-raise. Caller should ensure tx already
+        contains nonce + gas fields (use reserve_nonce + _gas_fields)."""
+        try:
+            signed = Account.sign_transaction(tx, self.private_key)
+            sent = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+            return sent.hex()
+        except Exception:
+            self.reset_nonce()
+            raise
 
     # ── SIWE auth helpers ─────────────────────────────────────────────
     def sign_message(self, message: str) -> str:

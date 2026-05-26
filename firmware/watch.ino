@@ -7,123 +7,138 @@
 #include <ArduinoJson.h>
 
 // ── Board: ESP32-C3 SuperMini v1601 ──────────────────────
-// (migrated from XIAO ESP32-S3 — Aug 2024 hardware change)
 // Arduino IDE:
 //   Tools → Board → ESP32 → "ESP32C3 Dev Module"
 //   Tools → USB CDC On Boot → Enabled  (required for Serial monitor)
 // Power:
-//   The C3 SuperMini has NO dedicated LiPo pad. Wire TP4056 OUT+ to the
-//   board's 5V pin (NOT 3.3V) — onboard regulator handles step-down.
+//   No LiPo pad on C3. Wire TP4056 OUT+ → board 5V pin (NOT 3.3V).
+//
+// ── FIX LOG ──────────────────────────────────────────────
+// v2 changes vs original:
+//   [1] SDA moved GPIO8 → GPIO6. GPIO8 = onboard blue LED on C3 SuperMini
+//       v1601. Driving I2C on GPIO8 caused constant LED flicker.
+//   [2] handleButtons() rewritten. Original read all pins before debounce
+//       check — caused SELECT drops under fast use. Now SELECT hold tracking
+//       runs outside debounce so long-press is never missed.
+//   [3] selectConsumed flag added. Prevents long-press AND short-press both
+//       firing for a single physical button press.
+//   [4] onShortPress() MENU_MANUAL fixed. Original incremented manualField
+//       then immediately checked == 3, skipping the SEND confirmation screen.
+//       Now checks first, then increments.
+//   [5] adjustConfig() case 1 (max orders) clamped correctly.
+//       agentMaxOrders = 0 means unlimited — DOWN from 0 stays at 0.
 
 // ── Display ──────────────────────────────────────────────
 #define SCREEN_W  128
 #define SCREEN_H  64
 #define OLED_ADDR 0x3C
-#define SDA_PIN   8   // C3: GPIO8 — same as XIAO
-#define SCL_PIN   9   // C3: GPIO9 — same as XIAO
+#define SDA_PIN   6   // FIX [1]: was 8 — GPIO8 = blue LED on C3 SuperMini
+#define SCL_PIN   9
 Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
 
-// ── Buttons (C3 SuperMini pinout) ─────────────────────────
-// XIAO used 1/2/3; C3 boot strapping conflicts with GPIO2/8/9 — moved up.
-#define BTN_UP     3   // was 1 on XIAO
-#define BTN_DOWN   4   // was 2 on XIAO
-#define BTN_SELECT 5   // was 3 on XIAO
+// ── Buttons (C3 SuperMini) ────────────────────────────────
+// GPIO3/4/5 — safe, no boot-strapping conflicts.
+// Active LOW — INPUT_PULLUP — no external resistors needed.
+#define BTN_UP     3
+#define BTN_DOWN   4
+#define BTN_SELECT 5
 #define LONG_PRESS_MS 600
 
 // ── Backend ──────────────────────────────────────────────
-// Laptop IP on en0 (Wi-Fi). Flask runs on 5001 (avoids macOS AirPlay :5000).
-// If laptop changes networks or DHCP reassigns, re-check with `ifconfig en0`.
+// Change to your laptop's local IP. Flask runs on 5001.
+// Find it with: ifconfig en0  (Mac) or  ip addr  (Linux)
 const char* BACKEND = "http://192.168.1.5:5001";
 
 // ── Known WiFi networks ───────────────────────────────────
-// Real credentials live in firmware/wifi_secrets.h (gitignored).
-// Copy wifi_secrets.example.h to wifi_secrets.h and fill in your networks.
+// Copy wifi_secrets.example.h → wifi_secrets.h and fill in your SSIDs/passes.
 #include "wifi_secrets.h"
 const int NUM_NETS = sizeof(knownNets) / sizeof(knownNets[0]);
 
 // ── Menus ────────────────────────────────────────────────
-enum Menu { 
-  MENU_WIFI=0, MENU_PRICES, MENU_AGENT, 
-  MENU_PORTFOLIO, MENU_LEADERBOARD, 
+enum Menu {
+  MENU_WIFI = 0, MENU_PRICES, MENU_AGENT,
+  MENU_PORTFOLIO, MENU_LEADERBOARD,
   MENU_MANUAL, MENU_CONFIG,
   MENU_COUNT
 };
-const char* menuNames[] = {
-  "WiFi", "Prices", "Agent",
-  "Portfolio", "Leaderboard",
-  "Manual Trade", "Config"
-};
 
-// ── State ────────────────────────────────────────────────
-Menu    currentMenu    = MENU_PRICES;
-int     menuScroll     = 0;
-bool    inSubMenu      = false;
-String  statusMsg      = "";
-unsigned long lastFetch= 0;
-unsigned long lastBtn  = 0;
-const int FETCH_EVERY  = 10000; // fetch every 10s
+// ── Global state ─────────────────────────────────────────
+Menu          currentMenu   = MENU_PRICES;
+unsigned long lastFetch     = 0;
+unsigned long lastBtn       = 0;
+const int     FETCH_EVERY   = 10000;  // ms between data refreshes
 
-// Data cache
-String priceWETH="--", priceWBTC="--", priceSOMI="--";
-String agentStatus="--", agentLast="--", agentTxs="--";
-String agentPaused="NO";
-int    agentMaxOrders = 100;   // mirror of server-side cap
+// Cached data strings — populated by fetch*() functions
+String priceWETH = "--", priceWBTC = "--", priceSOMI = "--";
+String agentPaused = "false";
+String agentLast   = "--";
+String agentTxs    = "0";
 int    agentOrdersDone = 0;
-String portAgent="--", portManual="--", portPnL="--";
-String lbRank="--", lbTxs="--", lbSignal="--", lbGap="--";
+int    agentMaxOrders  = 100;
+String portAgent = "--", portManual = "--", portPnL = "--";
+String lbRank = "--", lbTxs = "--", lbSignal = "--", lbGap = "--";
+String lbLive = "false";
 
-// Manual trade state (testnet: 3 pairs — WETH, WBTC, SOMI)
-int    manualPairIdx  = 0;  // 0=WETH 1=WBTC 2=SOMI
-int    manualSideIdx  = 0;  // 0=BUY  1=SELL
-float  manualAmt      = 1.0;
-int    manualField    = 0;  // which field is selected (0=pair,1=side,2=amt,3=send)
-const char* manualPairs[] = {"WETH","WBTC","SOMI"};
-const char* manualSides[] = {"BUY","SELL"};
+// Manual trade state
+int         manualPairIdx = 0;   // 0=WETH 1=WBTC 2=SOMI
+int         manualSideIdx = 0;   // 0=BUY  1=SELL
+float       manualAmt     = 1.0;
+int         manualField   = 0;   // 0=pair 1=side 2=amount 3=SEND
+const char* manualPairs[] = { "WETH", "WBTC", "SOMI" };
+const char* manualSides[] = { "BUY", "SELL" };
 
 // Config state
-int    cfgSpeedIdx   = 1;  // 0=slow 1=normal 2=fast 3=max
-const char* speeds[] = {"SLOW","NORMAL","FAST","MAX"};
-int    cfgField      = 0;  // 0=speed, 1=max_orders, 2=pause toggle
-const int MAX_ORDERS_STEP = 10;
+int         cfgSpeedIdx   = 1;   // 0=slow 1=normal 2=fast 3=max
+int         cfgField      = 0;   // 0=speed 1=max_orders 2=pause
+const char* speeds[]      = { "SLOW", "NORMAL", "FAST", "MAX" };
+const int   MAX_ORDERS_STEP = 10;
 
 // WiFi scan state
-int    wifiScroll   = 0;
-int    wifiCount    = 0;
+int    wifiScroll = 0;
+int    wifiCount  = 0;
 String wifiSSIDs[10];
 int    wifiRSSIs[10];
 bool   wifiKnown[10];
-bool   wifiScanned  = false;
+bool   wifiScanned = false;
 
-// ── Setup ─────────────────────────────────────────────────
+// Button state — FIX [2][3]
+unsigned long btnSelectDown  = 0;
+bool          btnSelectHeld  = false;
+bool          selectConsumed = false;  // FIX [3]: prevents double-fire
+
+// ─────────────────────────────────────────────────────────
+// SETUP
+// ─────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
+  delay(200);
+  Serial.println("[boot] DreamDEX Watch v2 starting");
 
-  // Buttons
   pinMode(BTN_UP,     INPUT_PULLUP);
   pinMode(BTN_DOWN,   INPUT_PULLUP);
   pinMode(BTN_SELECT, INPUT_PULLUP);
 
-  // OLED
+  // FIX [1]: SDA on GPIO6, not GPIO8
   Wire.begin(SDA_PIN, SCL_PIN);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println("SSD1306 not found");
-    while(true);
+    Serial.println("[oled] SSD1306 not found at 0x3C — try 0x3D");
+    while (true) delay(1000);
   }
   display.setTextColor(SSD1306_WHITE);
   display.clearDisplay();
   showSplash();
 
-  // WiFi
   currentMenu = MENU_WIFI;
   scanWiFi();
 }
 
-// ── Loop ──────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────
+// LOOP
+// ─────────────────────────────────────────────────────────
 void loop() {
   handleButtons();
 
-  // Fetch data every 10s (not on WiFi menu)
-  if (currentMenu != MENU_WIFI && 
+  if (currentMenu != MENU_WIFI &&
       millis() - lastFetch > FETCH_EVERY) {
     fetchData();
     lastFetch = millis();
@@ -133,9 +148,9 @@ void loop() {
   delay(50);
 }
 
-// ══════════════════════════════════════════════════════════
-// DISPLAY FUNCTIONS
-// ══════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════
+// DISPLAY
+// ═════════════════════════════════════════════════════════
 
 void showSplash() {
   display.clearDisplay();
@@ -143,9 +158,9 @@ void showSplash() {
   display.setCursor(10, 8);
   display.print("DreamDEX");
   display.setTextSize(1);
-  display.setCursor(25, 30);
-  display.print("Trading Watch");
-  display.setCursor(20, 45);
+  display.setCursor(20, 30);
+  display.print("Trading Watch v2");
+  display.setCursor(20, 44);
   display.print("0xF4c8...2905");
   display.display();
   delay(2000);
@@ -153,19 +168,21 @@ void showSplash() {
 
 void drawMenu() {
   display.clearDisplay();
-  switch(currentMenu) {
-    case MENU_WIFI:         drawWiFi();        break;
-    case MENU_PRICES:       drawPrices();      break;
-    case MENU_AGENT:        drawAgent();       break;
-    case MENU_PORTFOLIO:    drawPortfolio();   break;
-    case MENU_LEADERBOARD:  drawLeaderboard(); break;
-    case MENU_MANUAL:       drawManual();      break;
-    case MENU_CONFIG:       drawConfig();      break;
+  switch (currentMenu) {
+    case MENU_WIFI:        drawWiFi();        break;
+    case MENU_PRICES:      drawPrices();      break;
+    case MENU_AGENT:       drawAgent();       break;
+    case MENU_PORTFOLIO:   drawPortfolio();   break;
+    case MENU_LEADERBOARD: drawLeaderboard(); break;
+    case MENU_MANUAL:      drawManual();      break;
+    case MENU_CONFIG:      drawConfig();      break;
+    default: break;
   }
   display.display();
 }
 
-// ── Header helper ─────────────────────────────────────────
+// ── Shared helpers ────────────────────────────────────────
+
 void header(const char* title) {
   display.setTextSize(1);
   display.setCursor(0, 0);
@@ -173,13 +190,10 @@ void header(const char* title) {
   display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 }
 
-// ── Nav dots ──────────────────────────────────────────────
 void navDots() {
-  // Small dots at bottom showing menu position
-  int totalMenus = MENU_COUNT;
-  int dotSpacing = 128 / totalMenus;
-  for (int i = 0; i < totalMenus; i++) {
-    int x = i * dotSpacing + dotSpacing/2;
+  int sp = 128 / MENU_COUNT;
+  for (int i = 0; i < MENU_COUNT; i++) {
+    int x = i * sp + sp / 2;
     if (i == (int)currentMenu)
       display.fillCircle(x, 62, 2, SSD1306_WHITE);
     else
@@ -187,7 +201,8 @@ void navDots() {
   }
 }
 
-// ── WiFi Menu ─────────────────────────────────────────────
+// ── WiFi ──────────────────────────────────────────────────
+
 void drawWiFi() {
   header("< WiFi Select >");
   if (!wifiScanned) {
@@ -196,28 +211,20 @@ void drawWiFi() {
     return;
   }
   if (WiFi.status() == WL_CONNECTED) {
-    display.setCursor(0, 12);
-    display.print("Connected:");
-    display.setCursor(0, 22);
-    display.print(WiFi.SSID().substring(0,18));
-    display.setCursor(0, 34);
-    display.print("IP: ");
+    display.setCursor(0, 12); display.print("Connected:");
+    display.setCursor(0, 22); display.print(WiFi.SSID().substring(0, 18));
+    display.setCursor(0, 34); display.print("IP: ");
     display.print(WiFi.localIP());
-    display.setCursor(0, 46);
-    display.print("[SELECT] change WiFi");
+    display.setCursor(0, 46); display.print("[SELECT] change WiFi");
     return;
   }
-  // Show scan results
   for (int i = 0; i < min(wifiCount, 4); i++) {
     int idx = (wifiScroll + i) % wifiCount;
-    int y = 12 + i * 12;
-    // Cursor arrow
-    if (i == 0) display.print(">");
+    int y   = 12 + i * 12;
+    if (i == 0) { display.setCursor(0, y); display.print(">"); }
     display.setCursor(8, y);
-    // Known indicator
     if (wifiKnown[idx]) display.print("*");
     display.print(wifiSSIDs[idx].substring(0, 13));
-    // Signal strength
     display.setCursor(100, y);
     display.print(wifiRSSIs[idx]);
   }
@@ -225,31 +232,29 @@ void drawWiFi() {
   display.print("*=known  SELECT=conn");
 }
 
-// ── Prices Menu ────────────────────────────────────────────
+// ── Prices ────────────────────────────────────────────────
+
 void drawPrices() {
   header("< Prices >");
   display.setTextSize(1);
-  display.setCursor(0,  14); display.print("WETH  $"); display.print(priceWETH);
-  display.setCursor(0,  26); display.print("WBTC  $"); display.print(priceWBTC);
-  display.setCursor(0,  38); display.print("SOMI  $"); display.print(priceSOMI);
-  // Agent pause/play hint right on home screen
+  display.setCursor(0, 14); display.print("WETH  $"); display.print(priceWETH);
+  display.setCursor(0, 26); display.print("WBTC  $"); display.print(priceWBTC);
+  display.setCursor(0, 38); display.print("SOMI  $"); display.print(priceSOMI);
   display.setCursor(0, 50);
-  display.print(agentPaused=="true" ? "[Agent: PAUSED]" : "[Agent: PLAYING]");
+  display.print(agentPaused == "true" ? "[Agent: PAUSED]" : "[Agent: PLAY]");
   navDots();
 }
 
-// ── Agent Menu ─────────────────────────────────────────────
+// ── Agent ─────────────────────────────────────────────────
+
 void drawAgent() {
   header("< Agent >");
-  // Big play/pause indicator
   display.setTextSize(2);
   display.setCursor(0, 12);
-  display.print(agentPaused=="true" ? "|| PAUSED" : "> PLAY");
+  display.print(agentPaused == "true" ? "|| PAUSED" : "> PLAY");
   display.setTextSize(1);
-  // Last decision
   display.setCursor(0, 32);
   display.print(agentLast.substring(0, 21));
-  // Orders progress bar: N / MAX
   display.setCursor(0, 44);
   display.print("Orders: ");
   display.print(agentOrdersDone);
@@ -258,165 +263,161 @@ void drawAgent() {
   else                     display.print(agentMaxOrders);
   // Progress bar
   if (agentMaxOrders > 0) {
-    int barW = 120;
+    int barW   = 120;
     int filled = (int)(((float)agentOrdersDone / agentMaxOrders) * barW);
-    if (filled > barW) filled = barW;
+    filled = constrain(filled, 0, barW);
     display.drawRect(0, 54, barW, 5, SSD1306_WHITE);
     display.fillRect(0, 54, filled, 5, SSD1306_WHITE);
   }
-  // No navDots — bar is at the bottom now
 }
 
-// ── Portfolio Menu ─────────────────────────────────────────
+// ── Portfolio ─────────────────────────────────────────────
+
 void drawPortfolio() {
   header("< Portfolio >");
-  display.setCursor(0, 12);
-  display.print("Agent:  $"); display.print(portAgent);
-  display.setCursor(0, 24);
-  display.print("Manual: $"); display.print(portManual);
-  display.setCursor(0, 36);
-  display.print("P&L:    $"); display.print(portPnL);
+  display.setCursor(0, 12); display.print("Agent:  $"); display.print(portAgent);
+  display.setCursor(0, 24); display.print("Manual: $"); display.print(portManual);
+  display.setCursor(0, 36); display.print("P&L:    $"); display.print(portPnL);
   navDots();
 }
 
-// ── Leaderboard Menu ──────────────────────────────────────
-String lbLive = "false";   // "true" once Vercel deploy is up
+// ── Leaderboard ───────────────────────────────────────────
 
 void drawLeaderboard() {
   header("< Leaderboard >");
   if (lbLive != "true") {
-    // Mainnet leaderboard isn't deployed yet — show a holding screen
-    // instead of "#?" which looks like a parsing bug.
-    display.setCursor(0, 16);
-    display.print("Mainnet board");
-    display.setCursor(0, 26);
-    display.print("not live yet.");
-    display.setCursor(0, 40);
-    display.print("Tracks wallet:");
-    display.setCursor(0, 50);
-    display.print("0xF4c8...2905");
+    display.setCursor(0, 16); display.print("Mainnet board");
+    display.setCursor(0, 26); display.print("not live yet.");
+    display.setCursor(0, 40); display.print("Wallet tracked:");
+    display.setCursor(0, 50); display.print("0xF4c8...2905");
     return;
   }
   display.setTextSize(2);
   display.setCursor(30, 14);
   display.print("#"); display.print(lbRank);
   display.setTextSize(1);
-  display.setCursor(0, 34);
-  display.print("Txs: "); display.print(lbTxs);
+  display.setCursor(0, 34); display.print("Txs: "); display.print(lbTxs);
   display.setCursor(0, 44);
   display.print("Gap: "); display.print(lbGap);
   display.print(" | ");   display.print(lbSignal);
   navDots();
 }
 
-// ── Manual Trade Menu ─────────────────────────────────────
+// ── Manual Trade ──────────────────────────────────────────
+
 void drawManual() {
   header("< Manual Trade >");
-
-  // Pair row
+  // FIX [4]: field 3 is now a real SEND confirmation screen, not skipped
   display.setCursor(0, 12);
-  if (manualField == 0) display.print(">");
-  display.setCursor(8,12);
-  display.print("Pair: ");
-  display.print(manualPairs[manualPairIdx]);
+  display.print(manualField == 0 ? ">" : " ");
+  display.setCursor(8, 12);
+  display.print("Pair: "); display.print(manualPairs[manualPairIdx]);
 
-  // Side row
   display.setCursor(0, 24);
-  if (manualField == 1) display.print(">");
+  display.print(manualField == 1 ? ">" : " ");
   display.setCursor(8, 24);
-  display.print("Side: ");
-  display.print(manualSides[manualSideIdx]);
+  display.print("Side: "); display.print(manualSides[manualSideIdx]);
 
-  // Amount row
   display.setCursor(0, 36);
-  if (manualField == 2) display.print(">");
+  display.print(manualField == 2 ? ">" : " ");
   display.setCursor(8, 36);
-  display.print("Amt:  $");
-  display.print(manualAmt, 2);
+  display.print("Amt:  $"); display.print(manualAmt, 2);
 
-  // Send button
   display.setCursor(0, 50);
   if (manualField == 3) {
-    display.print("[>> SEND TRADE <<]");
+    display.print("[>> PRESS SEL SEND]");
   } else {
-    display.print("  [SEL to choose]");
+    display.print("  SEL=next  LP=back");
   }
 }
 
-// ── Config Menu ───────────────────────────────────────────
+// ── Config ────────────────────────────────────────────────
+
 void drawConfig() {
   header("< Config >");
-  // Field 0: speed
   display.setCursor(0, 12);
   display.print(cfgField == 0 ? ">" : " ");
-  display.print(" Speed: ");
-  display.print(speeds[cfgSpeedIdx]);
+  display.print(" Speed: "); display.print(speeds[cfgSpeedIdx]);
 
-  // Field 1: max orders
   display.setCursor(0, 24);
   display.print(cfgField == 1 ? ">" : " ");
-  display.print(" Max Ord: ");
+  display.print(" MaxOrd: ");
   if (agentMaxOrders == 0) display.print("inf");
   else                     display.print(agentMaxOrders);
 
-  // Field 2: play/pause
   display.setCursor(0, 36);
   display.print(cfgField == 2 ? ">" : " ");
   display.print(" Agent: ");
-  display.print(agentPaused=="true" ? "PAUSED" : "PLAY");
+  display.print(agentPaused == "true" ? "PAUSED" : "PLAY");
 
-  // Hint
   display.setCursor(0, 52);
-  display.print("SEL=cycle UP/DN=edit");
+  display.print("SEL=next  UP/DN=edit");
 }
 
-// ══════════════════════════════════════════════════════════
-// BUTTON HANDLING
-// ══════════════════════════════════════════════════════════
-
-unsigned long btnSelectDown = 0;
-bool          btnSelectHeld = false;
+// ═════════════════════════════════════════════════════════
+// BUTTON HANDLING  — FIX [2][3]
+// ═════════════════════════════════════════════════════════
+//
+// Design:
+//  • SELECT hold tracking runs every loop iteration, outside debounce.
+//    Original code returned early before updating btnSelectDown, causing
+//    long-press to be missed when debounce was active.
+//  • selectConsumed flag prevents both long-press AND short-press firing
+//    for one physical press.
+//  • UP / DOWN remain debounced independently — SELECT does not reset their
+//    debounce timer, so rapid UP → SELECT sequences register correctly.
 
 void handleButtons() {
-  bool up  = (digitalRead(BTN_UP)   == LOW);
-  bool dn  = (digitalRead(BTN_DOWN) == LOW);
-  bool sel = (digitalRead(BTN_SELECT)== LOW);
+  bool sel = (digitalRead(BTN_SELECT) == LOW);
 
-  // Debounce
-  if (millis() - lastBtn < 200) return;
-
-  // Long press detection on SELECT = go back to prev menu
+  // ── SELECT: track outside debounce so hold is never missed ──
   if (sel) {
     if (btnSelectDown == 0) btnSelectDown = millis();
-    if (!btnSelectHeld && millis() - btnSelectDown > LONG_PRESS_MS) {
-      btnSelectHeld = true;
+    if (!btnSelectHeld && !selectConsumed &&
+        millis() - btnSelectDown > LONG_PRESS_MS) {
+      btnSelectHeld  = true;
+      selectConsumed = true;
       onLongPress();
       lastBtn = millis();
     }
-    return;
+    return;  // while held, do nothing else
   } else {
-    if (btnSelectDown > 0 && !btnSelectHeld) {
-      onShortPress();
-      lastBtn = millis();
+    // SELECT just released
+    if (btnSelectDown > 0) {
+      if (!btnSelectHeld && !selectConsumed) {
+        // Short press — apply debounce only here
+        if (millis() - lastBtn >= 200) {
+          onShortPress();
+          lastBtn = millis();
+        }
+      }
+      btnSelectDown  = 0;
+      btnSelectHeld  = false;
+      selectConsumed = false;
     }
-    btnSelectDown = 0;
-    btnSelectHeld = false;
   }
 
-  if (up) { onUp(); lastBtn = millis(); }
-  if (dn) { onDown(); lastBtn = millis(); }
+  // ── UP / DOWN: standard debounce ────────────────────────
+  if (millis() - lastBtn < 200) return;
+
+  bool up = (digitalRead(BTN_UP)   == LOW);
+  bool dn = (digitalRead(BTN_DOWN) == LOW);
+
+  if (up) { onUp();   lastBtn = millis(); return; }
+  if (dn) { onDown(); lastBtn = millis(); return; }
 }
 
+// ── Button actions ────────────────────────────────────────
+
 void onUp() {
-  switch(currentMenu) {
+  switch (currentMenu) {
     case MENU_WIFI:
-      wifiScroll = (wifiScroll - 1 + wifiCount) % max(wifiCount,1);
+      wifiScroll = (wifiScroll - 1 + max(wifiCount, 1)) % max(wifiCount, 1);
       break;
     case MENU_PRICES:
     case MENU_AGENT:
     case MENU_PORTFOLIO:
     case MENU_LEADERBOARD:
-      // Cycle to previous menu
       currentMenu = (Menu)(((int)currentMenu - 1 + MENU_COUNT) % MENU_COUNT);
       break;
     case MENU_MANUAL:
@@ -425,11 +426,12 @@ void onUp() {
     case MENU_CONFIG:
       adjustConfig(-1);
       break;
+    default: break;
   }
 }
 
 void onDown() {
-  switch(currentMenu) {
+  switch (currentMenu) {
     case MENU_WIFI:
       wifiScroll = (wifiScroll + 1) % max(wifiCount, 1);
       break;
@@ -445,101 +447,100 @@ void onDown() {
     case MENU_CONFIG:
       adjustConfig(1);
       break;
+    default: break;
   }
 }
 
 void onShortPress() {
-  switch(currentMenu) {
+  switch (currentMenu) {
     case MENU_WIFI:
       connectToSelected();
       break;
+
     case MENU_AGENT:
       postToggleAgent();
       break;
+
     case MENU_MANUAL:
-      manualField = (manualField + 1) % 4;
-      if (manualField == 0 && /* just wrapped */ true) {
-        // Send when field rolls back to 0 after SEND
-      }
+      // FIX [4]: check BEFORE incrementing so field 3 = visible SEND screen
       if (manualField == 3) {
-        // On SEND field, select triggers trade
         sendManualTrade();
         manualField = 0;
+      } else {
+        manualField++;
       }
       break;
+
     case MENU_CONFIG:
-      // Cycle the focused field; on the pause field SEL toggles agent state.
-      if (cfgField == 2) {
-        postToggleAgent();
-      }
+      // On the pause field, SEL toggles agent immediately before cycling
+      if (cfgField == 2) postToggleAgent();
       cfgField = (cfgField + 1) % 3;
       break;
+
     default:
       break;
   }
 }
 
 void onLongPress() {
-  // Long press = go back / home
-  if (currentMenu == MENU_MANUAL) {
-    manualField = 0;
-  }
-  currentMenu = MENU_PRICES; // home
+  // Always returns to home (Prices), resets sub-menu state
+  manualField = 0;
+  cfgField    = 0;
+  currentMenu = MENU_PRICES;
+  Serial.println("[btn] long press → home");
 }
 
+// ── Value adjusters ───────────────────────────────────────
+
 void adjustManual(int dir) {
-  switch(manualField) {
-    case 0: // pair
+  switch (manualField) {
+    case 0:
       manualPairIdx = (manualPairIdx + dir + 3) % 3;
       break;
-    case 1: // side
+    case 1:
       manualSideIdx = (manualSideIdx + dir + 2) % 2;
       break;
-    case 2: // amount
-      manualAmt += dir * 0.5;
-      if (manualAmt < 0.1) manualAmt = 0.1;
-      if (manualAmt > 10)  manualAmt = 10;
+    case 2:
+      manualAmt = constrain(manualAmt + dir * 0.5f, 0.1f, 10.0f);
       break;
+    default: break;
   }
 }
 
 void adjustConfig(int dir) {
-  switch(cfgField) {
-    case 0: // speed
+  switch (cfgField) {
+    case 0:  // speed
       cfgSpeedIdx = (cfgSpeedIdx + dir + 4) % 4;
       postSpeed();
       break;
-    case 1: // max orders, step of 10. -10 from minimum wraps to "inf" (0).
-      agentMaxOrders += dir * MAX_ORDERS_STEP;
-      if (agentMaxOrders < 0) agentMaxOrders = 0;        // 0 = unlimited
-      if (agentMaxOrders > 1000) agentMaxOrders = 1000;
+    case 1:  // max orders — FIX [5]: clamp correctly, 0 = unlimited
+      agentMaxOrders = constrain(agentMaxOrders + dir * MAX_ORDERS_STEP, 0, 1000);
       postMaxOrders();
       break;
-    case 2: // pause/play — UP or DOWN both toggle
+    case 2:  // pause/play — UP or DOWN both toggle
       postToggleAgent();
       break;
+    default: break;
   }
 }
 
-// ══════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════
 // WIFI
-// ══════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════
 
 void scanWiFi() {
   display.clearDisplay();
-  display.setCursor(15,25);
   display.setTextSize(1);
+  display.setCursor(15, 25);
   display.print("Scanning WiFi...");
   display.display();
 
-  // Force radio into a known-clean STA state. Without this, scanning can
-  // leave the C3's WiFi state machine half-initialised and the next
-  // WiFi.begin() call fails with "sta is connecting, cannot set config".
-  WiFi.disconnect(true, true);   // erase prior config + stop any in-flight conn
+  // Tear down prior state — prevents "sta is connecting, cannot set config"
+  WiFi.disconnect(true, true);
   WiFi.mode(WIFI_STA);
-  delay(100);
+  delay(150);
 
-  wifiCount = WiFi.scanNetworks();
+  wifiCount  = WiFi.scanNetworks();
   wifiScanned = true;
 
   for (int i = 0; i < min(wifiCount, 10); i++) {
@@ -553,79 +554,86 @@ void scanWiFi() {
       }
     }
   }
-  // Free the scan result buffer — leaves the radio cleanly idle for begin().
-  WiFi.scanDelete();
+  WiFi.scanDelete();  // free scan buffer
 }
 
 void connectToSelected() {
+  if (wifiCount == 0) return;
   int idx = wifiScroll % wifiCount;
+
   if (!wifiKnown[idx]) {
-    statusMsg = "Unknown network";
+    display.clearDisplay();
+    display.setCursor(10, 28);
+    display.print("Unknown network");
+    display.display();
+    delay(1500);
     return;
   }
-  String ssid = wifiSSIDs[idx];
+
+  String      ssid = wifiSSIDs[idx];
   const char* pass = "";
   for (int k = 0; k < NUM_NETS; k++) {
-    if (ssid == knownNets[k].ssid) {
-      pass = knownNets[k].pass;
-      break;
-    }
+    if (ssid == knownNets[k].ssid) { pass = knownNets[k].pass; break; }
   }
+
   display.clearDisplay();
-  display.setCursor(0,20);
-  display.print("Connecting...");
-  display.print(ssid);
+  display.setCursor(0, 12); display.print("Connecting to:");
+  display.setCursor(0, 22); display.print(ssid.substring(0, 20));
   display.display();
 
-  // Tear down any prior/in-flight association before begin(). The C3's WiFi
-  // driver rejects begin() with "sta is connecting, cannot set config" if
-  // a previous attempt is still mid-association. disconnect(true,true) wipes
-  // the cached SSID/pass and clears the state machine.
   WiFi.disconnect(true, true);
   WiFi.mode(WIFI_STA);
-  delay(100);
+  delay(150);
   WiFi.begin(ssid.c_str(), pass);
 
   int tries = 0;
   while (WiFi.status() != WL_CONNECTED && tries < 30) {
-    delay(500); tries++;
-    // Show progress dots so the user knows it's not frozen
+    delay(500);
+    tries++;
+    display.setCursor(tries * 4, 38);
     display.print(".");
     display.display();
   }
+
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("[wifi] connected ssid=%s ip=%s rssi=%d\n",
-                  ssid.c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    Serial.printf("[wifi] connected  ssid=%s  ip=%s  rssi=%d\n",
+                  ssid.c_str(),
+                  WiFi.localIP().toString().c_str(),
+                  WiFi.RSSI());
     currentMenu = MENU_PRICES;
     fetchData();
+    lastFetch = millis();
   } else {
-    Serial.printf("[wifi] connect FAILED status=%d (1=NO_SSID, 4=CONN_FAIL, 6=DISCONN)\n",
-                  WiFi.status());
+    Serial.printf("[wifi] FAILED  status=%d\n", WiFi.status());
     display.clearDisplay();
-    display.setCursor(0, 16); display.print("Connect failed");
-    display.setCursor(0, 28); display.print("status=");
-    display.print(WiFi.status());
-    display.setCursor(0, 44); display.print("SELECT to retry");
+    display.setCursor(0, 14); display.print("Connect FAILED");
+    display.setCursor(0, 26); display.print("status="); display.print(WiFi.status());
+    display.setCursor(0, 38); display.print("1=no ssid 4=fail");
+    display.setCursor(0, 50); display.print("SELECT to retry");
     display.display();
-    delay(2000);
-    // Re-scan so the user can re-pick — clears stale state
+    delay(2500);
     WiFi.disconnect(true, true);
     scanWiFi();
   }
 }
 
-// ══════════════════════════════════════════════════════════
-// DATA FETCHING
-// ══════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════
+// HTTP HELPERS
+// ═════════════════════════════════════════════════════════
 
 String httpGet(String path) {
-  if (WiFi.status() != WL_CONNECTED) return "{}";
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.printf("[http] GET %s skipped — no WiFi\n", path.c_str());
+    return "{}";
+  }
   HTTPClient http;
   http.begin(String(BACKEND) + path);
   http.setTimeout(5000);
-  int code = http.GET();
+  int    code = http.GET();
   String body = (code == 200) ? http.getString() : "{}";
   http.end();
+  if (code != 200)
+    Serial.printf("[http] GET %s → %d\n", path.c_str(), code);
   return body;
 }
 
@@ -634,10 +642,24 @@ void httpPost(String path, String payload) {
   HTTPClient http;
   http.begin(String(BACKEND) + path);
   http.addHeader("Content-Type", "application/json");
+  // Shared-secret auth (mainnet refuses requests without it). API_KEY comes
+  // from wifi_secrets.h — copy wifi_secrets.example.h and set API_KEY to the
+  // same value the backend has in FLASK_API_KEY env var.
+  #ifdef API_KEY
+    http.addHeader("X-API-Key", API_KEY);
+  #endif
   http.setTimeout(5000);
-  http.POST(payload);
+  int code = http.POST(payload);
   http.end();
+  if (code < 0)
+    Serial.printf("[http] POST %s → %d\n", path.c_str(), code);
+  else if (code == 401)
+    Serial.printf("[http] POST %s → 401 (missing/bad API_KEY)\n", path.c_str());
 }
+
+// ═════════════════════════════════════════════════════════
+// DATA FETCH
+// ═════════════════════════════════════════════════════════
 
 void fetchData() {
   fetchPrices();
@@ -650,7 +672,6 @@ void fetchPrices() {
   String body = httpGet("/prices");
   StaticJsonDocument<1024> doc;
   if (deserializeJson(doc, body)) return;
-  // Testnet only has 3 pairs (WETH/WBTC/SOMI). USDC.e pulled — was always "--".
   priceWETH = String((float)doc["WETH:USDso"]["mid"], 2);
   priceWBTC = String((float)doc["WBTC:USDso"]["mid"], 0);
   priceSOMI = String((float)doc["SOMI:USDso"]["mid"], 5);
@@ -660,14 +681,14 @@ void fetchAgent() {
   String body = httpGet("/agent");
   StaticJsonDocument<512> doc;
   if (deserializeJson(doc, body)) return;
-  agentPaused = doc["paused"] ? "true" : "false";
-  agentTxs    = String((int)doc["state"]["tx_count"]);
+  agentPaused    = doc["paused"] ? "true" : "false";
+  agentTxs       = String((int)doc["state"]["tx_count"]);
   agentOrdersDone = doc["orders_done"] | (int)doc["state"]["tx_count"];
   agentMaxOrders  = doc["max_orders"]  | 0;
-  String action = doc["last_decision"]["action"] | "hold";
-  String pair   = doc["last_decision"]["pair"]   | "-";
-  String reason = doc["last_decision"]["reason"] | "-";
-  agentLast = action + " " + pair.substring(0,4) + ": " + reason;
+  String action  = doc["last_decision"]["action"] | "hold";
+  String pair    = doc["last_decision"]["pair"]   | "-";
+  String reason  = doc["last_decision"]["reason"] | "-";
+  agentLast = action + " " + pair.substring(0, 4) + ": " + reason;
 }
 
 void fetchPortfolio() {
@@ -676,49 +697,54 @@ void fetchPortfolio() {
   if (deserializeJson(doc, body)) return;
   portAgent  = String((float)doc["agent_balance"],  2);
   portManual = String((float)doc["manual_balance"], 2);
-  float pnl  = (float)doc["total_value"] - 50.0;
-  portPnL    = (pnl >= 0 ? "+" : "") + String(pnl, 2);
+  float pnl  = (float)doc["total_value"] - 50.0f;
+  portPnL    = (pnl >= 0.0f ? "+" : "") + String(pnl, 2);
 }
 
 void fetchLeaderboard() {
   String body = httpGet("/leaderboard");
   StaticJsonDocument<512> doc;
   if (deserializeJson(doc, body)) return;
-  lbLive   = doc["live"] ? "true" : "false";
-  // my_rank can be int or "?" string — coerce safely.
-  // NB: ArduinoJson's `|` default operator must be applied BEFORE the C cast,
-  // otherwise `|` becomes bitwise OR on a const char* and fails to compile.
-  if (doc["my_rank"].is<int>()) lbRank = String((int)doc["my_rank"]);
-  else                          lbRank = String((const char*)(doc["my_rank"] | "?"));
+  lbLive = doc["live"] ? "true" : "false";
+  if (doc["my_rank"].is<int>())
+    lbRank = String((int)doc["my_rank"]);
+  else
+    lbRank = String(doc["my_rank"] | "?");
   lbTxs    = String((int)doc["my_tx"]);
   lbGap    = String((int)doc["gap"]);
   lbSignal = String(doc["signal"] | "--");
-  // Truncate signal for display
-  if (lbSignal == "ACCELERATE")  lbSignal = "ACCEL";
-  if (lbSignal == "MAINTAIN")    lbSignal = "OK";
-  if (lbSignal == "SLOW DOWN")   lbSignal = "SLOW";
-  if (lbSignal == "MAX SPEED")   lbSignal = "MAX";
+  if      (lbSignal == "ACCELERATE") lbSignal = "ACCEL";
+  else if (lbSignal == "MAINTAIN")   lbSignal = "OK";
+  else if (lbSignal == "SLOW DOWN")  lbSignal = "SLOW";
+  else if (lbSignal == "MAX SPEED")  lbSignal = "MAX";
 }
 
-// ══════════════════════════════════════════════════════════
-// ACTIONS
-// ══════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════
+// TRADE ACTIONS
+// ═════════════════════════════════════════════════════════
 
 void sendManualTrade() {
-  String pairs[] = {"WETH:USDso","WBTC:USDso","SOMI:USDso"};
-  // Arduino String::toLowerCase() returns void (mutates in place), so it
-  // can't be inlined into a concat — build the lowercase side separately.
+  const char* pairsFull[] = { "WETH:USDso", "WBTC:USDso", "SOMI:USDso" };
+  // Arduino String::toLowerCase() mutates in place — build separately
   String sideLower = manualSides[manualSideIdx];
   sideLower.toLowerCase();
-  String payload = "{\"pair\":\"" + pairs[manualPairIdx] +
-                   "\",\"side\":\"" + sideLower +
-                   "\",\"amount_usdso\":" + String(manualAmt, 2) + "}";
+  String payload =
+    "{\"pair\":\"" + String(pairsFull[manualPairIdx]) +
+    "\",\"side\":\"" + sideLower +
+    "\",\"amount_usdso\":" + String(manualAmt, 2) + "}";
+
   display.clearDisplay();
-  display.setCursor(20, 24);
-  display.print("Sending trade...");
+  display.setCursor(0, 14); display.print("Sending trade...");
+  display.setCursor(0, 26); display.print(manualPairs[manualPairIdx]);
+  display.print(" "); display.print(manualSides[manualSideIdx]);
+  display.setCursor(0, 38); display.print("$"); display.print(manualAmt, 2);
   display.display();
+
   httpPost("/manual", payload);
   delay(1000);
+
+  // Refresh portfolio immediately after trade
+  fetchPortfolio();
 }
 
 void postToggleAgent() {
@@ -728,13 +754,13 @@ void postToggleAgent() {
 }
 
 void postSpeed() {
-  String payload = "{\"speed\":\"" + String(speeds[cfgSpeedIdx]) + "\"}";
-  // lowercase it
-  payload.toLowerCase();
-  httpPost("/agent/speed", payload);
+  // Build lowercase speed string manually (toLowerCase mutates)
+  String s = speeds[cfgSpeedIdx];
+  s.toLowerCase();
+  httpPost("/agent/speed", "{\"speed\":\"" + s + "\"}");
 }
 
 void postMaxOrders() {
-  String payload = "{\"max_orders\":" + String(agentMaxOrders) + "}";
-  httpPost("/agent/max_orders", payload);
+  httpPost("/agent/max_orders",
+           "{\"max_orders\":" + String(agentMaxOrders) + "}");
 }

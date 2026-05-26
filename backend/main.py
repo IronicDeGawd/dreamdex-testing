@@ -9,13 +9,29 @@ import server
 
 def main():
     # Verify secrets
-    from config import PRIVATE_KEY
+    from config import PRIVATE_KEY, ENV, FLASK_API_KEY
     assert PRIVATE_KEY, \
         "Set your wallet key: export TESTNET_PRIVATE_KEY=0x... (or MAINNET_PRIVATE_KEY for mainnet)"
     if not os.environ.get("OPENAI_KEY"):
-        print("[main] ⚠️  OPENAI_KEY not set. Agent will run in Rule-Based Fallback mode.")
+        if ENV == "mainnet":
+            # M1: hard refuse mainnet without OPENAI_KEY. Rule-based fallback fires real
+            # trades with confidence=100 (bypassing the confidence gate) — too dangerous
+            # with real money. Force the user to explicitly opt out by setting OPENAI_KEY=disable.
+            if os.environ.get("OPENAI_KEY", "") != "disable":
+                raise RuntimeError(
+                    "OPENAI_KEY is unset on MAINNET. Rule-based fallback would trade with real money "
+                    "and bypasses the confidence gate. Set OPENAI_KEY=<real key>, or "
+                    "OPENAI_KEY=disable to acknowledge fallback-only operation."
+                )
+            print("[main] ⚠️  OPENAI_KEY=disable on mainnet — fallback only, will trade SOMI $1 every tick.")
+        else:
+            print("[main] ⚠️  OPENAI_KEY not set. Agent will run in Rule-Based Fallback mode.")
+    if ENV == "mainnet" and not FLASK_API_KEY:
+        # Belt-and-suspenders — server.init also checks this, but failing here gives a
+        # clearer error message before any subsystem boots.
+        raise RuntimeError("FLASK_API_KEY env var is REQUIRED on mainnet — set it before launch.")
 
-    from config import ENV, SOMNIA_RPC, DREAMDEX_HTTP, MY_ADDRESS, FLASK_PORT
+    from config import SOMNIA_RPC, DREAMDEX_HTTP, MY_ADDRESS, FLASK_PORT
     print("="*55)
     print(f"  DreamDEX Trading Bot — {ENV.upper()} mode")
     print(f"  Wallet:  {MY_ADDRESS}")
@@ -29,7 +45,8 @@ def main():
     lb        = LeaderboardMonitor()
     portfolio = Portfolio()
     manual    = ManualTrader()
-    agent     = TradingAgent()
+    # C2: agent reads capital from on-chain Portfolio, not local AgentState.
+    agent     = TradingAgent(portfolio=portfolio)
 
     # Wire: prices → agent analyzer
     prices.add_subscriber(agent.on_price_update)

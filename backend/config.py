@@ -44,6 +44,10 @@ OPENAI_MODEL = "gpt-4o-mini"
 # ── Flask server ──────────────────────────────────────────
 FLASK_HOST = "0.0.0.0"
 FLASK_PORT = int(os.environ.get("FLASK_PORT", 5001))
+# Shared-secret API key for mutating POST endpoints. Watch firmware sends it as X-API-Key header.
+# Set via `export FLASK_API_KEY=<random>` before launching backend; same value in firmware/wifi_secrets.h.
+# If empty AND ENV == "mainnet", server refuses to start. On testnet, missing key disables auth (dev mode).
+FLASK_API_KEY = os.environ.get("FLASK_API_KEY", "")
 
 # ── Leaderboard (mainnet-only, always) ────────────────────
 # The competition leaderboard lives on mainnet regardless of which network

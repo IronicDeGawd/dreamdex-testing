@@ -66,14 +66,37 @@ class DreamDEX:
             quote = m.get("quote")
             # Only override base if doc gives a non-zero address. Native pools
             # legitimately use 0x0 sentinel — keep mkt["native"] as source of truth.
+            # M5: only override base if config has the 0x0 sentinel. Otherwise
+            # the hardcoded canonical mainnet address wins; we warn on mismatch
+            # but don't silently replace (testnet API can return casing/quirks
+            # that would corrupt mainnet config).
+            cfg_base = (mkt.get("base") or "").lower()
+            is_sentinel = cfg_base in ("", "0x0000000000000000000000000000000000000000")
             if base and int(base, 16) != 0 and not mkt.get("native"):
-                mkt["base"] = base
+                if is_sentinel:
+                    mkt["base"] = base
+                elif cfg_base != base.lower():
+                    print(f"[DreamDEX] ⚠️  API base {base} != config base {cfg_base} for {sym} — keeping config")
             if quote:
-                mkt["quote"] = quote
+                cfg_quote = (mkt.get("quote") or "").lower()
+                if cfg_quote in ("", "0x0000000000000000000000000000000000000000"):
+                    mkt["quote"] = quote
+                elif cfg_quote != quote.lower():
+                    print(f"[DreamDEX] ⚠️  API quote {quote} != config quote {cfg_quote} for {sym} — keeping config")
             if "baseDecimals" in m:
-                mkt["baseDecimals"] = int(m["baseDecimals"])
+                cfg_dec = int(mkt.get("baseDecimals", -1))
+                api_dec = int(m["baseDecimals"])
+                if cfg_dec == -1:
+                    mkt["baseDecimals"] = api_dec
+                elif cfg_dec != api_dec:
+                    print(f"[DreamDEX] ⚠️  API baseDecimals {api_dec} != config {cfg_dec} for {sym} — keeping config")
             if "quoteDecimals" in m:
-                mkt["quoteDecimals"] = int(m["quoteDecimals"])
+                cfg_dec = int(mkt.get("quoteDecimals", -1))
+                api_dec = int(m["quoteDecimals"])
+                if cfg_dec == -1:
+                    mkt["quoteDecimals"] = api_dec
+                elif cfg_dec != api_dec:
+                    print(f"[DreamDEX] ⚠️  API quoteDecimals {api_dec} != config {cfg_dec} for {sym} — keeping config")
             # Floats parsed from string for downstream price/qty snapping
             for k in ("tickSize", "lotSize", "minQuantity"):
                 if k in m:
@@ -306,8 +329,12 @@ class DreamDEX:
                 if not top:
                     return {"status": "error", "error": "no bids in book — would silent-reject"}
                 raw_price = max(top - tick, tick)
-            snapped = round(round(raw_price / tick) * tick, 6)
-            payload["price"] = f"{snapped:.6f}".rstrip("0").rstrip(".")
+            # M2: format price at exactly the tick's decimal precision so
+            # floating-point artifacts (0.0000999…) don't survive rstrip("0").
+            tick_str = f"{tick:.10f}".rstrip("0")
+            tick_decimals = max(0, len(tick_str.split(".")[1])) if "." in tick_str else 0
+            snapped = round(round(raw_price / tick) * tick, tick_decimals)
+            payload["price"] = f"{snapped:.{tick_decimals}f}"
             print(f"[DreamDEX] book top: bid={book['bid']} ask={book['ask']}  → limit {payload['price']}")
 
         try:
@@ -353,19 +380,41 @@ class DreamDEX:
                 except Exception:
                     dec = fallback_dec
 
-                raw_amount = int(app_amount * (10 ** dec))
+                # H2: cap approve at 2x the order's actual cost. If the API ever
+                # returns the amount as a raw integer (already 10^dec scaled), the
+                # naive `app_amount * 10^dec` would over-approve by 1e6–1e18×.
+                # Sanity bound: 2× (qty × price) in quote, or 2× qty in base.
+                raw_naive = int(app_amount * (10 ** dec))
+                # Compute the conservative cap. Use the order's own price/qty.
+                from config import MARKETS as _M
+                _mkt = _M.get(symbol, {})
+                if app_token.lower() == str(_mkt.get("quote", "")).lower():
+                    cap_human = float(payload.get("price", "0") or 0) * qty * 2.0
+                else:
+                    cap_human = qty * 2.0
+                raw_cap = int(cap_human * (10 ** dec)) if cap_human > 0 else raw_naive
+                # If naive is wildly bigger than cap (more than 1e4×), assume the
+                # API returned a raw int already — use cap. Otherwise trust naive.
+                if cap_human > 0 and raw_naive > raw_cap * 10_000:
+                    print(f"[DreamDEX] ⚠️  approval.amount={app_amount} looks already-scaled; capping at {cap_human}")
+                    raw_amount = raw_cap
+                else:
+                    raw_amount = raw_naive
 
                 from config import MARKETS
                 pool_addr = Web3.to_checksum_address(MARKETS[symbol]["contract"])
 
                 tx = token_contract.functions.approve(pool_addr, raw_amount).build_transaction({
-                    "from": self.wallet.address,
-                    "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address, "pending"),
-                    "gasPrice": self.wallet.w3.eth.gas_price,
+                    "from":  self.wallet.address,
+                    "nonce": self.wallet.reserve_nonce(),
+                    **self.wallet._gas_fields(),
                 })
                 from eth_account import Account
-                signed = Account.sign_transaction(tx, self.wallet.private_key)
-                a_hash = self.wallet.w3.eth.send_raw_transaction(signed.raw_transaction).hex()
+                try:
+                    a_hash = self.wallet.sign_and_send(tx)
+                except Exception:
+                    self.wallet.reset_nonce()
+                    raise
                 self.wallet.wait_for_receipt(a_hash)
                 print(f"[DreamDEX] Approve confirmed: {a_hash}")
 
@@ -378,6 +427,39 @@ class DreamDEX:
             if not sim_ok:
                 return {"status": "would_revert", "sim_raw": sim_raw[:200]}
 
+            # C4: capture pre-trade vault balances so we can prove a real fill
+            # via balance delta rather than heuristic log matching.
+            from web3 import Web3 as _Web3
+            from config import MARKETS as _MARKETS
+            mkt = _MARKETS.get(symbol, {})
+            pool_addr_cs = _Web3.to_checksum_address(resp.get("to") or mkt.get("contract", ""))
+            quote_addr_cs = _Web3.to_checksum_address(mkt["quote"]) if mkt.get("quote") else None
+            base_addr_cs = None
+            if mkt.get("base") and not mkt.get("native") and int(mkt["base"], 16) != 0:
+                base_addr_cs = _Web3.to_checksum_address(mkt["base"])
+            wb_abi = [{
+                "name": "getWithdrawableBalance", "type": "function", "stateMutability": "view",
+                "inputs": [{"name": "u", "type": "address"}, {"name": "t", "type": "address"}],
+                "outputs": [{"name": "", "type": "uint256"}],
+            }]
+            pool_c = self.wallet.w3.eth.contract(address=pool_addr_cs, abi=wb_abi)
+
+            def _read_vault():
+                pre = {"quote": 0, "base": 0}
+                try:
+                    if quote_addr_cs:
+                        pre["quote"] = pool_c.functions.getWithdrawableBalance(self.wallet.address, quote_addr_cs).call()
+                except Exception:
+                    pass
+                try:
+                    if base_addr_cs:
+                        pre["base"] = pool_c.functions.getWithdrawableBalance(self.wallet.address, base_addr_cs).call()
+                except Exception:
+                    pass
+                return pre
+
+            vault_before = _read_vault()
+
             # Sign + broadcast the order tx
             tx_hash = self.wallet.send_unsigned_tx(resp)
             print(f"[DreamDEX] Order TX sent: {tx_hash}")
@@ -389,21 +471,47 @@ class DreamDEX:
                 print(f"[DreamDEX] ❌ TX reverted on-chain (status={status})")
                 return {"status": "reverted", "tx_hash": tx_hash}
 
-            # Silent reject detection: docs say placeOrder can return
-            # (success=false, orderId=0) with status=1 and zero/no relevant logs.
-            # keccak256("OrderPlaced(...)") topic — we don't have exact sig yet,
-            # so accept any log from the pool contract as a success signal and
-            # treat absence as silent reject.
-            logs = receipt.get("logs", []) or []
-            pool_addr = str(resp.get("to", "")).lower()
-            pool_logs = [l for l in logs if str(getattr(l, "address", l.get("address", ""))).lower() == pool_addr] if pool_addr else logs
-            if not pool_logs:
-                print(f"[DreamDEX] ⚠️  status=1 but no pool logs — silent reject "
-                      f"(expireNs=0? self-trade? PostOnly cross? FOK underfill?)")
-                return {"status": "silent_reject", "tx_hash": tx_hash}
+            # C4: Real fill detection via vault balance delta. Buy decreases quote +
+            # increases base; sell does the opposite. Vault funding is the only
+            # path place_order uses for this client, so vault-delta is authoritative.
+            # For wallet-funded orders (no vault movement), we fall back to the
+            # log heuristic — still flagging "any pool log" as a softer signal.
+            vault_after = _read_vault()
+            fill_proven = False
+            fill_summary = ""
+            if side.lower() == "buy":
+                qd = vault_before["quote"] - vault_after["quote"]
+                bd = vault_after["base"] - vault_before["base"]
+                if qd > 0 or bd > 0:
+                    fill_proven = True
+                    fill_summary = f"quote -{qd}, base +{bd}"
+            else:
+                bd = vault_before["base"] - vault_after["base"]
+                qd = vault_after["quote"] - vault_before["quote"]
+                if bd > 0 or qd > 0:
+                    fill_proven = True
+                    fill_summary = f"base -{bd}, quote +{qd}"
 
-            print(f"[DreamDEX] ✅ {side.upper()} {qty} {symbol} confirmed (block {receipt.get('blockNumber')})")
-            return {"status": "success", "tx_hash": tx_hash, "block": str(receipt.get("blockNumber"))}
+            if not fill_proven:
+                # Fallback: any log from pool contract — same heuristic as before but only when
+                # vault delta was zero (which is the wallet-funded path or a true silent reject).
+                logs = receipt.get("logs", []) or []
+                pool_addr_l = pool_addr_cs.lower()
+                pool_logs = [l for l in logs if str(getattr(l, "address", l.get("address", ""))).lower() == pool_addr_l]
+                if not pool_logs:
+                    print(f"[DreamDEX] ⚠️  status=1 but vault unchanged + no pool logs — silent reject")
+                    return {"status": "silent_reject", "tx_hash": tx_hash}
+                print(f"[DreamDEX] ⚠️  vault unchanged but pool emitted logs — marking unverified")
+                return {"status": "unverified", "tx_hash": tx_hash, "block": str(receipt.get("blockNumber"))}
+
+            print(f"[DreamDEX] ✅ {side.upper()} {qty} {symbol} confirmed via vault delta ({fill_summary}) "
+                  f"(block {receipt.get('blockNumber')})")
+            return {
+                "status":      "success",
+                "tx_hash":     tx_hash,
+                "block":       str(receipt.get("blockNumber")),
+                "vault_delta": fill_summary,
+            }
 
         except Exception as e:
             print(f"[DreamDEX] place_order exception: {e}")
@@ -486,11 +594,10 @@ class DreamDEX:
             tx = pool.functions.depositNative().build_transaction({
                 "from": self.wallet.address,
                 "value": raw_amount,
-                "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address, "pending"),
-                "gasPrice": self.wallet.w3.eth.gas_price,
+                "nonce": self.wallet.reserve_nonce(),
+                **self.wallet._gas_fields(),
             })
-            signed = Account.sign_transaction(tx, self.wallet.private_key)
-            tx_hash = self.wallet.w3.eth.send_raw_transaction(signed.raw_transaction).hex()
+            tx_hash = self.wallet.sign_and_send(tx)
             self.wallet.wait_for_receipt(tx_hash)
             print(f"[DreamDEX] Native deposit confirmed: {tx_hash}")
             return tx_hash
@@ -511,12 +618,11 @@ class DreamDEX:
             if allowance < raw_amount:
                 print(f"[DreamDEX] Approving {amount} USDso/ERC20 to SpotPool {pool_addr}...")
                 tx = token.functions.approve(pool_addr, raw_amount).build_transaction({
-                    "from": self.wallet.address,
-                    "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address, "pending"),
-                    "gasPrice": self.wallet.w3.eth.gas_price,
+                    "from":  self.wallet.address,
+                    "nonce": self.wallet.reserve_nonce(),
+                    **self.wallet._gas_fields(),
                 })
-                signed = Account.sign_transaction(tx, self.wallet.private_key)
-                tx_hash = self.wallet.w3.eth.send_raw_transaction(signed.raw_transaction).hex()
+                tx_hash = self.wallet.sign_and_send(tx)
                 self.wallet.wait_for_receipt(tx_hash)
                 print(f"[DreamDEX] Approval confirmed: {tx_hash}")
 
@@ -530,11 +636,10 @@ class DreamDEX:
             print(f"[DreamDEX] Depositing {amount} token {token_addr} into SpotPool...")
             tx = pool.functions.deposit(token_addr_checksum, raw_amount).build_transaction({
                 "from": self.wallet.address,
-                "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address, "pending"),
-                "gasPrice": self.wallet.w3.eth.gas_price,
+                "nonce": self.wallet.reserve_nonce(),
+                **self.wallet._gas_fields(),
             })
-            signed = Account.sign_transaction(tx, self.wallet.private_key)
-            tx_hash = self.wallet.w3.eth.send_raw_transaction(signed.raw_transaction).hex()
+            tx_hash = self.wallet.sign_and_send(tx)
             self.wallet.wait_for_receipt(tx_hash)
             print(f"[DreamDEX] Deposit confirmed: {tx_hash}")
             return tx_hash
@@ -569,12 +674,11 @@ class DreamDEX:
         pool = self.wallet.w3.eth.contract(address=pool_addr, abi=pool_abi)
         print(f"[DreamDEX] Withdrawing {amount} token {token_addr} from SpotPool vault...")
         tx = pool.functions.withdraw(token_addr_checksum, raw_amount).build_transaction({
-            "from": self.wallet.address,
-            "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address, "pending"),
-            "gasPrice": self.wallet.w3.eth.gas_price,
+            "from":  self.wallet.address,
+            "nonce": self.wallet.reserve_nonce(),
+            **self.wallet._gas_fields(),
         })
-        signed = Account.sign_transaction(tx, self.wallet.private_key)
-        tx_hash = self.wallet.w3.eth.send_raw_transaction(signed.raw_transaction).hex()
+        tx_hash = self.wallet.sign_and_send(tx)
         self.wallet.wait_for_receipt(tx_hash)
         print(f"[DreamDEX] Withdrawal confirmed: {tx_hash}")
         return tx_hash
