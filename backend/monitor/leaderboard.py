@@ -73,11 +73,22 @@ class LeaderboardMonitor:
             total = len(lb)
             my_rank = "?"
             my_tx = 0
+            my_fills = 0
+            my_vol = 0.0
+            my_pnl = 0.0
+            my_bal = 0.0
             target = LEADERBOARD_ADDRESS.lower()
             for idx, entry in enumerate(lb):
                 if str(entry.get("address", "")).lower() == target:
-                    my_rank = idx + 1
-                    my_tx   = tx_of(entry)
+                    my_rank  = idx + 1
+                    my_tx    = tx_of(entry)
+                    my_fills = int(entry.get("fills", 0) or 0)
+                    try: my_vol = float(entry.get("volumeUsdso") or entry.get("volume") or 0)
+                    except (TypeError, ValueError): my_vol = 0.0
+                    try: my_pnl = float(entry.get("pnl") or 0)
+                    except (TypeError, ValueError): my_pnl = 0.0
+                    try: my_bal = float(entry.get("usdsoBalance") or 0)
+                    except (TypeError, ValueError): my_bal = 0.0
                     break
 
             third_tx = tx_of(lb[2]) if total >= 3 else (tx_of(lb[-1]) if total else 0)
@@ -94,14 +105,18 @@ class LeaderboardMonitor:
                 signal = "ACCELERATE"
 
             self.stats = {
-                "my_rank":  my_rank,
-                "total":    total,
-                "my_tx":    my_tx,
-                "third_tx": third_tx,
-                "gap":      gap,
-                "signal":   signal,
-                "address":  LEADERBOARD_ADDRESS,
-                "live":     True,
+                "my_rank":   my_rank,
+                "total":     total,
+                "my_tx":     my_tx,
+                "my_fills":  my_fills,
+                "my_volume": my_vol,
+                "my_pnl":    my_pnl,
+                "my_balance": my_bal,
+                "third_tx":  third_tx,
+                "gap":       gap,
+                "signal":    signal,
+                "address":   LEADERBOARD_ADDRESS,
+                "live":      True,
             }
         except Exception as e:
             print(f"[LeaderboardMonitor] fetch error: {e}")
