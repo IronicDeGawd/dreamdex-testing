@@ -79,8 +79,31 @@ String agentTxs    = "0";
 int    agentOrdersDone = 0;
 int    agentMaxOrders  = 100;
 String portAgent = "--", portManual = "--", portPnL = "--";
+float  portTotal = 0.0f;       // raw total_value from /portfolio (for PnL pct)
+float  portWalletUsdso = 0.0f; // raw usdso_wallet (loose USDso)
+float  portVaultsTotal = 0.0f; // raw sum of all pool vaults (locked USDso)
 String lbRank = "--", lbTxs = "--", lbSignal = "--", lbGap = "--";
 String lbLive = "false";
+
+// ── Sparkline ring buffers ────────────────────────────────
+// 24 samples × 3 pairs = 72 floats = 288 bytes — cheap on the C3.
+// FETCH_EVERY is 10s, so 24 samples covers the last 4 minutes of mid prices.
+constexpr int SPARK_LEN = 24;
+struct PriceHist { float vals[SPARK_LEN]; int count; };
+PriceHist histWETH = {{0}, 0};
+PriceHist histWBTC = {{0}, 0};
+PriceHist histSOMI = {{0}, 0};
+
+void pushHist(PriceHist& h, float v) {
+  if (v <= 0.0f) return;   // ignore 0/missing
+  if (h.count < SPARK_LEN) {
+    h.vals[h.count++] = v;
+  } else {
+    // shift left, drop oldest
+    for (int i = 0; i < SPARK_LEN - 1; i++) h.vals[i] = h.vals[i + 1];
+    h.vals[SPARK_LEN - 1] = v;
+  }
+}
 
 // Manual trade state
 int         manualPairIdx = 0;   // 0=WETH 1=WBTC 2=SOMI
@@ -205,6 +228,35 @@ void header(const char* title) {
   display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 }
 
+// Render a sparkline at (x, y) of size (w, h) from a PriceHist ring buffer.
+// Normalises values to [0, h-1] by the visible window's min/max so even small
+// percentage moves show up. With <2 samples, draws a horizontal flat line.
+void drawSparkline(int x, int y, int w, int h, const PriceHist& hist) {
+  const int n = hist.count;
+  if (n < 2) {
+    // Flat line — nothing meaningful to chart yet.
+    display.drawLine(x, y + h / 2, x + w - 1, y + h / 2, SSD1306_WHITE);
+    return;
+  }
+  // Find min/max
+  float lo = hist.vals[0], hi = hist.vals[0];
+  for (int i = 1; i < n; i++) {
+    if (hist.vals[i] < lo) lo = hist.vals[i];
+    if (hist.vals[i] > hi) hi = hist.vals[i];
+  }
+  float range = hi - lo;
+  if (range < 1e-9f) range = 1.0f;   // flat → middle line
+  // Map each sample to (px, py)
+  int prevPx = x, prevPy = y + h - 1 - (int)((hist.vals[0] - lo) / range * (h - 1));
+  for (int i = 1; i < n; i++) {
+    int px = x + (int)((float)i / (float)(n - 1) * (w - 1));
+    int py = y + h - 1 - (int)((hist.vals[i] - lo) / range * (h - 1));
+    display.drawLine(prevPx, prevPy, px, py, SSD1306_WHITE);
+    prevPx = px;
+    prevPy = py;
+  }
+}
+
 void navDots() {
   // Hide MENU_WIFI's dot when connected — it's no longer reachable via UP/DOWN
   // (only re-appears on disconnect).
@@ -259,9 +311,20 @@ void drawWiFi() {
 void drawPrices() {
   header("< Prices >");
   display.setTextSize(1);
-  display.setCursor(0, 14); display.print("WETH  $"); display.print(priceWETH);
-  display.setCursor(0, 26); display.print("WBTC  $"); display.print(priceWBTC);
-  display.setCursor(0, 38); display.print("SOMI  $"); display.print(priceSOMI);
+  // Label + price (left side), sparkline (right side, 50px wide × 9px tall).
+  // Each row uses ~12px vertical pitch. y is the text baseline.
+  // Sparklines span x=78..127 (50 px wide).
+  const int SPARK_X = 78, SPARK_W = 50, SPARK_H = 9;
+
+  display.setCursor(0, 14); display.print("WETH $"); display.print(priceWETH);
+  drawSparkline(SPARK_X, 13, SPARK_W, SPARK_H, histWETH);
+
+  display.setCursor(0, 26); display.print("WBTC $"); display.print(priceWBTC);
+  drawSparkline(SPARK_X, 25, SPARK_W, SPARK_H, histWBTC);
+
+  display.setCursor(0, 38); display.print("SOMI $"); display.print(priceSOMI);
+  drawSparkline(SPARK_X, 37, SPARK_W, SPARK_H, histSOMI);
+
   display.setCursor(0, 50);
   display.print(agentPaused == "true" ? "[Agent: PAUSED]" : "[Agent: PLAY]");
   navDots();
@@ -297,10 +360,30 @@ void drawAgent() {
 
 void drawPortfolio() {
   header("< Portfolio >");
-  display.setCursor(0, 12); display.print("Agent:  $"); display.print(portAgent);
-  display.setCursor(0, 24); display.print("Manual: $"); display.print(portManual);
-  display.setCursor(0, 36); display.print("P&L:    $"); display.print(portPnL);
-  navDots();
+  // Big total at the top — most-glanced number on this screen.
+  display.setTextSize(2);
+  display.setCursor(0, 12);
+  display.print("$");
+  display.print(portTotal, 2);
+  display.setTextSize(1);
+
+  // PnL with arrow and percent
+  float pnl = portTotal - 50.0f;
+  float pctPnl = (pnl / 50.0f) * 100.0f;
+  display.setCursor(0, 32);
+  display.print("PnL ");
+  display.print(pnl >= 0 ? "+" : "");
+  display.print(pnl, 2);
+  display.print(" (");
+  display.print(pctPnl, 1);
+  display.print("%)");
+
+  // Breakdown: wallet (loose) + vaults (locked in dreamDEX pools)
+  display.setCursor(0, 42);
+  display.print("wallet $"); display.print(portWalletUsdso, 2);
+  display.setCursor(0, 52);
+  display.print("vaults $"); display.print(portVaultsTotal, 2);
+  display.print(" tx "); display.print(agentTxs);
 }
 
 // ── Leaderboard ───────────────────────────────────────────
@@ -329,7 +412,6 @@ void drawLeaderboard() {
 
 void drawManual() {
   header("< Manual Trade >");
-  // FIX [4]: field 3 is now a real SEND confirmation screen, not skipped
   display.setCursor(0, 12);
   display.print(manualField == 0 ? ">" : " ");
   display.setCursor(8, 12);
@@ -347,9 +429,11 @@ void drawManual() {
 
   display.setCursor(0, 50);
   if (manualField == 3) {
-    display.print("[>> PRESS SEL SEND]");
+    // SEND confirmation. UP/DOWN cancel back to field 0; SEL fires the trade;
+    // hold SEL returns home (cancels too).
+    display.print("SEL:send UP/DN:cancel");
   } else {
-    display.print("  SEL=next  LP=back");
+    display.print("SEL:next  HOLD:home");
   }
 }
 
@@ -373,7 +457,7 @@ void drawConfig() {
   display.print(agentPaused == "true" ? "PAUSED" : "PLAY");
 
   display.setCursor(0, 52);
-  display.print("SEL=next  UP/DN=edit");
+  display.print("SEL:next UP/DN HOLD:home");
 }
 
 // ═════════════════════════════════════════════════════════
@@ -549,6 +633,12 @@ void adjustManual(int dir) {
       break;
     case 2:
       manualAmt = constrain(manualAmt + dir * 0.5f, 0.1f, 10.0f);
+      break;
+    case 3:
+      // SEND confirmation screen — UP/DOWN cancels back to field 0 (Pair).
+      // Without this the only way out of the SEND screen was long-press
+      // (which goes all the way home), which felt accidental.
+      manualField = 0;
       break;
     default: break;
   }
@@ -745,9 +835,15 @@ void fetchPrices() {
   String body = httpGet("/prices");
   StaticJsonDocument<1024> doc;
   if (deserializeJson(doc, body)) return;
-  priceWETH = String((float)doc["WETH:USDso"]["mid"], 2);
-  priceWBTC = String((float)doc["WBTC:USDso"]["mid"], 0);
-  priceSOMI = String((float)doc["SOMI:USDso"]["mid"], 5);
+  float mWETH = doc["WETH:USDso"]["mid"];
+  float mWBTC = doc["WBTC:USDso"]["mid"];
+  float mSOMI = doc["SOMI:USDso"]["mid"];
+  priceWETH = String(mWETH, 2);
+  priceWBTC = String(mWBTC, 0);
+  priceSOMI = String(mSOMI, 5);
+  pushHist(histWETH, mWETH);
+  pushHist(histWBTC, mWBTC);
+  pushHist(histSOMI, mSOMI);
 }
 
 void fetchAgent() {
@@ -770,7 +866,17 @@ void fetchPortfolio() {
   if (deserializeJson(doc, body)) return;
   portAgent  = String((float)doc["agent_balance"],  2);
   portManual = String((float)doc["manual_balance"], 2);
-  float pnl  = (float)doc["total_value"] - 50.0f;
+  portTotal  = (float)doc["total_value"];
+  portWalletUsdso = (float)doc["usdso_wallet"];
+  // Sum across all pool vaults
+  portVaultsTotal = 0.0f;
+  JsonObject vaults = doc["usdso_vaults"].as<JsonObject>();
+  if (!vaults.isNull()) {
+    for (JsonPair kv : vaults) {
+      portVaultsTotal += (float)kv.value();
+    }
+  }
+  float pnl  = portTotal - 50.0f;
   portPnL    = (pnl >= 0.0f ? "+" : "") + String(pnl, 2);
 }
 
