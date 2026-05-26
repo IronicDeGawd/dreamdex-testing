@@ -141,6 +141,18 @@ void setup() {
 void loop() {
   handleButtons();
 
+  // Watchdog: if WiFi drops and we're NOT already on the WiFi screen, jump
+  // there so the user can pick a new network. Re-scan first so the SSID list
+  // is fresh. Skips the long-press SELECT escape requirement for this state.
+  static bool wasConnected = false;
+  bool connectedNow = (WiFi.status() == WL_CONNECTED);
+  if (wasConnected && !connectedNow && currentMenu != MENU_WIFI) {
+    Serial.println("[wifi] connection lost → returning to WiFi menu");
+    currentMenu = MENU_WIFI;
+    scanWiFi();   // refresh list
+  }
+  wasConnected = connectedNow;
+
   if (currentMenu != MENU_WIFI &&
       millis() - lastFetch > FETCH_EVERY) {
     fetchData();
@@ -194,13 +206,20 @@ void header(const char* title) {
 }
 
 void navDots() {
-  int sp = 128 / MENU_COUNT;
+  // Hide MENU_WIFI's dot when connected — it's no longer reachable via UP/DOWN
+  // (only re-appears on disconnect).
+  bool hideWifi = (WiFi.status() == WL_CONNECTED);
+  int visible = hideWifi ? (MENU_COUNT - 1) : MENU_COUNT;
+  int sp = 128 / visible;
+  int slot = 0;
   for (int i = 0; i < MENU_COUNT; i++) {
-    int x = i * sp + sp / 2;
+    if (hideWifi && i == (int)MENU_WIFI) continue;
+    int x = slot * sp + sp / 2;
     if (i == (int)currentMenu)
       display.fillCircle(x, 62, 2, SSD1306_WHITE);
     else
       display.drawCircle(x, 62, 1, SSD1306_WHITE);
+    slot++;
   }
 }
 
@@ -412,13 +431,28 @@ void handleButtons() {
 
 // ── Button actions ────────────────────────────────────────
 
+// Cycle to the next/prev menu while skipping MENU_WIFI when already connected.
+// When disconnected MENU_WIFI is the boot/active screen so it's always shown.
+Menu cycleMenu(Menu cur, int dir) {
+  bool connected = (WiFi.status() == WL_CONNECTED);
+  Menu next = cur;
+  // At most MENU_COUNT iterations — guarantees termination even in weird states.
+  for (int i = 0; i < MENU_COUNT; i++) {
+    next = (Menu)(((int)next + dir + MENU_COUNT) % MENU_COUNT);
+    if (connected && next == MENU_WIFI) continue;   // skip
+    return next;
+  }
+  return cur;   // fallback, shouldn't happen
+}
+
 void onUp() {
   switch (currentMenu) {
     case MENU_WIFI:
-      // When already connected, UP/DOWN navigates menus (no SSID list to scroll
-      // through anyway). When not connected, UP/DOWN scrolls the SSID list.
+      // Disconnected: UP scrolls the SSID list.
+      // Connected: shouldn't be reachable since we hide MENU_WIFI from the
+      // cycle, but if we land here defensively, exit to the previous menu.
       if (WiFi.status() == WL_CONNECTED) {
-        currentMenu = (Menu)(((int)currentMenu - 1 + MENU_COUNT) % MENU_COUNT);
+        currentMenu = cycleMenu(currentMenu, -1);
       } else {
         wifiScroll = (wifiScroll - 1 + max(wifiCount, 1)) % max(wifiCount, 1);
       }
@@ -427,7 +461,7 @@ void onUp() {
     case MENU_AGENT:
     case MENU_PORTFOLIO:
     case MENU_LEADERBOARD:
-      currentMenu = (Menu)(((int)currentMenu - 1 + MENU_COUNT) % MENU_COUNT);
+      currentMenu = cycleMenu(currentMenu, -1);
       break;
     case MENU_MANUAL:
       adjustManual(-1);
@@ -443,7 +477,7 @@ void onDown() {
   switch (currentMenu) {
     case MENU_WIFI:
       if (WiFi.status() == WL_CONNECTED) {
-        currentMenu = (Menu)(((int)currentMenu + 1) % MENU_COUNT);
+        currentMenu = cycleMenu(currentMenu, +1);
       } else {
         wifiScroll = (wifiScroll + 1) % max(wifiCount, 1);
       }
@@ -452,7 +486,7 @@ void onDown() {
     case MENU_AGENT:
     case MENU_PORTFOLIO:
     case MENU_LEADERBOARD:
-      currentMenu = (Menu)(((int)currentMenu + 1) % MENU_COUNT);
+      currentMenu = cycleMenu(currentMenu, +1);
       break;
     case MENU_MANUAL:
       adjustManual(1);
