@@ -74,25 +74,40 @@ class SomniaWallet:
         Sign and broadcast a tx dict like:
           { "to": "0x...", "data": "0x...", "value": "0", "gasLimit": "250000" }
         Returns tx hash string.
+
+        R2: auto-recovers from `nonce too low` once by re-syncing from chain.
+        That happens when another process (docker exec, manual REPL) consumed
+        nonces in parallel with the long-lived server wallet.
         """
-        nonce = self.reserve_nonce()
         api_gas = int(tx.get("gasLimit", 300_000))
         gas = max(3_000_000, int(api_gas * 2))
-        tx_fields = {
-            "to":      Web3.to_checksum_address(tx["to"]),
-            "data":    tx.get("data", "0x"),
-            "value":   int(tx.get("value", 0)),
-            "gas":     gas,
-            "nonce":   nonce,
-            "chainId": self.chain_id,
-            **self._gas_fields(),
-        }
-        try:
+
+        def _build_and_send(n: int) -> str:
+            tx_fields = {
+                "to":      Web3.to_checksum_address(tx["to"]),
+                "data":    tx.get("data", "0x"),
+                "value":   int(tx.get("value", 0)),
+                "gas":     gas,
+                "nonce":   n,
+                "chainId": self.chain_id,
+                **self._gas_fields(),
+            }
             signed_tx = Account.sign_transaction(tx_fields, self.private_key)
             sent = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
             return sent.hex()
-        except Exception:
-            # If sign/send fails, the nonce we reserved was burnt — re-sync from chain.
+
+        nonce = self.reserve_nonce()
+        try:
+            return _build_and_send(nonce)
+        except Exception as e:
+            msg = str(e).lower()
+            if "nonce too low" in msg or "0x04" in msg:
+                # External nonce consumption — re-sync once and retry.
+                print(f"[wallet] nonce drift detected (used={nonce}); resyncing and retrying once")
+                self.reset_nonce()
+                nonce2 = self.reserve_nonce()
+                return _build_and_send(nonce2)
+            # Other failures: burn nonce, force fresh sync next time.
             self.reset_nonce()
             raise
 
@@ -104,14 +119,21 @@ class SomniaWallet:
 
     def sign_and_send(self, tx: dict) -> str:
         """Sign + broadcast a pre-built tx dict (from a contract .build_transaction()
-        call). Wraps in try/except so a failed send doesn't burn a nonce permanently —
-        we reset the cached nonce and re-raise. Caller should ensure tx already
-        contains nonce + gas fields (use reserve_nonce + _gas_fields)."""
+        call). On nonce drift, retries once with a fresh nonce. Caller should
+        ensure tx already contains nonce + gas fields."""
         try:
             signed = Account.sign_transaction(tx, self.private_key)
             sent = self.w3.eth.send_raw_transaction(signed.raw_transaction)
             return sent.hex()
-        except Exception:
+        except Exception as e:
+            msg = str(e).lower()
+            if "nonce too low" in msg or "0x04" in msg:
+                print(f"[wallet] sign_and_send nonce drift; resyncing and retrying once")
+                self.reset_nonce()
+                tx["nonce"] = self.reserve_nonce()
+                signed = Account.sign_transaction(tx, self.private_key)
+                sent = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+                return sent.hex()
             self.reset_nonce()
             raise
 
