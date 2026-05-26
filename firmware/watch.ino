@@ -92,6 +92,13 @@ float  portWalletUsdso = 0.0f; // raw usdso_wallet (loose USDso)
 float  portVaultsTotal = 0.0f; // raw sum of all pool vaults (locked USDso)
 String lbRank = "--", lbTxs = "--", lbSignal = "--", lbGap = "--";
 String lbLive = "false";
+// True when the agent reported "capital floor hit" as its hold reason —
+// drives the BAL LOW warning on the Agent screen so the user knows
+// to top up USDso instead of wondering why "Play" doesn't trade.
+bool   agentCapitalLow = false;
+// AGENT_STOP_BELOW from backend config.py — the floor below which the agent
+// refuses to trade. Hardcoded here for the UI; if backend changes it, update.
+constexpr float AGENT_FLOOR_USDSO = 22.0f;
 
 // ── Sparkline ring buffers ────────────────────────────────
 // 24 samples × 3 pairs = 72 floats = 288 bytes — cheap on the C3.
@@ -356,6 +363,29 @@ void drawPrices() {
 
 void drawAgent() {
   header("< Agent >");
+
+  // BAL LOW warning takes priority over the regular layout — when the agent
+  // is held by the capital floor, "Play" looks broken to the user unless we
+  // tell them WHY. Show the actionable amount needed.
+  if (agentCapitalLow) {
+    display.setTextSize(2);
+    display.setCursor(0, 12);
+    display.print("BAL LOW");
+    display.setTextSize(1);
+    display.setCursor(0, 32);
+    display.print("USDso: $");
+    display.print(portWalletUsdso, 2);
+    display.setCursor(0, 42);
+    float need = AGENT_FLOOR_USDSO - portWalletUsdso;
+    if (need < 0) need = 0;
+    display.print("Need: $");
+    display.print(need, 2);
+    display.print(" more");
+    display.setCursor(0, 52);
+    display.print("Top up to start");
+    return;
+  }
+
   display.setTextSize(2);
   display.setCursor(0, 12);
   display.print(agentPaused == "true" ? "|| PAUSED" : "> PLAY");
@@ -890,6 +920,9 @@ void fetchAgent() {
   String pair    = doc["last_decision"]["pair"]   | "-";
   String reason  = doc["last_decision"]["reason"] | "-";
   agentLast = action + " " + pair.substring(0, 4) + ": " + reason;
+  // Flag for the BAL LOW warning on drawAgent. Reason string from backend is
+  // exactly "capital floor hit" when AGENT_STOP_BELOW gates the tick.
+  agentCapitalLow = (reason.indexOf("capital floor") >= 0);
 }
 
 void fetchPortfolio() {
