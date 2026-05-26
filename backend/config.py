@@ -22,14 +22,14 @@ MANUAL_CAPITAL  = 20.0
 
 # ── Agent Risk Rules ──────────────────────────────────────
 AGENT_MIN_TRADE      = 0.10
-AGENT_MAX_TRADE      = 2.5
-AGENT_STOP_BELOW     = 22.0
+AGENT_MAX_TRADE      = 5.0
+AGENT_STOP_BELOW     = 35.0
 AGENT_CONFIDENCE_MIN = 65
 MAX_CONCURRENT_POS   = 3
 # Hard cap on total trades the agent will execute before auto-holding.
 # 0 = unlimited. Adjustable at runtime via POST /agent/max_orders.
 AGENT_MAX_ORDERS     = int(os.environ.get("AGENT_MAX_ORDERS", 100))
-AGENT_FUNDING_SOURCE = os.environ.get("AGENT_FUNDING_SOURCE", "vault")  # "vault" or "wallet"
+AGENT_FUNDING_SOURCE = os.environ.get("AGENT_FUNDING_SOURCE", "wallet")  # "vault" or "wallet" — wallet is the only path that actually fills on mainnet
 
 # ── Timing ────────────────────────────────────────────────
 AGENT_LOOP_SECONDS = int(os.environ.get("AGENT_LOOP_SECONDS", 300))
