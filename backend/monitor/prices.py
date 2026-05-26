@@ -73,32 +73,41 @@ class PriceFeed:
             self._fetch_ticker(pair)
 
     def _fetch_ticker(self, pair: str):
-        """GET /v0/markets/{symbol}/tickers — returns 24h OHLCV snapshot.
-        The API accepts WETH:USDso with literal colon in the URL path.
-        Response shape: {"symbols": [{"close": "0", "high": "0", ...}]}
+        """Pull LIVE top-of-book bid/ask from /v0/orderbooks?symbols=...
+
+        Previously this hit /v0/markets/{pair}/tickers which is a 24h OHLCV
+        snapshot — its `close` price changes only daily, producing identical
+        polls and a totally flat sparkline. The orderbook endpoint returns
+        real bid/ask that move tick-by-tick.
         """
         try:
-            url  = f"{DREAMDEX_HTTP}/v0/markets/{pair}/tickers"
-            resp = self._session.get(url, timeout=5)
+            url  = f"{DREAMDEX_HTTP}/v0/orderbooks"
+            resp = self._session.get(url, params={"symbols": pair}, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
-                # Real shape: {"symbols": [{"close": ..., "high": ..., "low": ..., "open": ..., "symbol": ..., "timestamp": ...}]}
-                if isinstance(data, dict) and "symbols" in data:
-                    syms = data["symbols"]
-                    data = syms[0] if syms else {}
+                book = data
+                if isinstance(data, dict) and "orderbooks" in data and data["orderbooks"]:
+                    book = data["orderbooks"][0]
+                elif isinstance(data, dict) and "symbols" in data and data["symbols"]:
+                    book = data["symbols"][0]
                 elif isinstance(data, list) and data:
-                    data = data[0]
-                close = float(data.get("close", 0))
-                last  = float(data.get("lastPrice", close))
-                if last > 0:
-                    bid = last * 0.9999
-                    ask = last * 1.0001
-                    self.update_book(pair, bid, ask)
+                    book = data[0]
+                bids = book.get("bids") or []
+                asks = book.get("asks") or []
+                bid_px = ask_px = 0.0
+                if bids:
+                    t = bids[0]
+                    bid_px = float(t.get("price", t[0] if isinstance(t, list) else 0))
+                if asks:
+                    t = asks[0]
+                    ask_px = float(t.get("price", t[0] if isinstance(t, list) else 0))
+                if bid_px > 0 and ask_px > 0:
+                    self.update_book(pair, bid_px, ask_px)
                     return
-            # Fallback: most recent trade
+            # Empty book or non-200 — fall back to most recent trade
             self._fetch_last_trade(pair)
         except Exception as e:
-            print(f"[PriceFeed] REST ticker error {pair}: {e}")
+            print(f"[PriceFeed] orderbook error {pair}: {e}")
             self._fetch_last_trade(pair)
 
     def _fetch_last_trade(self, pair: str):
