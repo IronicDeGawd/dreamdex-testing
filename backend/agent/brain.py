@@ -82,16 +82,23 @@ Hard rules:
 - ROUND-TRIP RULE (still required): after a BUY of pair X the NEXT non-hold
   action MUST be a SELL of pair X. We close every position the same tick we
   open it — no inventory carry.
+- DIVERSITY RULE: after closing a round-trip on pair X, the very next BUY
+  must NOT be on pair X. Rotate across SOMI / USDC.e / WETH. If only pair
+  X currently shows momentum, HOLD for a tick or two — let X cool down,
+  then re-enter. Spreading fills across pools matters more than catching
+  every signal on a single pair.
 
 Profit logic:
 1. Look at the 30-minute momentum % for each pair (provided below).
-2. If a pair is DOWN > 0.3% AND you have no open position → BUY $4–5
-   (mean-reversion: buy the dip, expect a bounce).
+2. If a pair is DOWN > 0.3% AND you have no open position AND that pair
+   is NOT the one you just closed → BUY $4–5 (mean-reversion: buy the
+   dip, expect a bounce).
 3. If a pair is UP > 0.3% AND you have an open position in it → SELL it
    (lock the gain).
 4. If your last successful trade was a BUY (round-trip pending) → SELL it
    even if momentum hasn't moved 0.3% (you must close).
-5. Otherwise → HOLD with confidence 90.
+5. Otherwise → HOLD with confidence 90. Holding is fine; we wait for
+   diversity to refresh.
 
 Confidence guide:
 - |momentum| > 0.5% AND clear direction → confidence 80+
@@ -222,6 +229,7 @@ def _build_prompt(prices, positions, balances, history, lb) -> str:
     # what side it MUST take next. This is the strongest single signal we can
     # give the model — without it the LLM keeps drifting back to "buy SOMI".
     round_trip_hint = "  (no successful trades yet — start with a BUY of SOMI:USDso)"
+    just_closed_pair = None  # for diversity rule in PROFIT mode
     for t in reversed(history):
         if t.get('result', {}).get('status') == 'success':
             act = t.get('action')
@@ -229,8 +237,17 @@ def _build_prompt(prices, positions, balances, history, lb) -> str:
             if act == 'buy':
                 round_trip_hint = f"  Last successful: BUY {pair}. Next MUST be SELL {pair} (round-trip)."
             elif act == 'sell':
-                round_trip_hint = f"  Last successful: SELL {pair}. You may now start a fresh BUY (any allowed pair)."
+                round_trip_hint = f"  Last successful: SELL {pair}. Round-trip is closed."
+                just_closed_pair = pair
             break
+
+    # DIVERSITY HINT (PROFIT mode): if the last action closed a round-trip on
+    # pair X, the next BUY must pick something else. Surface the explicit
+    # "available pairs" list so the LLM doesn't drift back to the same name.
+    allowed_for_buy = ["SOMI:USDso", "USDC.e:USDso", "WETH:USDso"]
+    if just_closed_pair in allowed_for_buy:
+        allowed_for_buy = [p for p in allowed_for_buy if p != just_closed_pair]
+        round_trip_hint += f" Diversity: avoid {just_closed_pair} on the next BUY; pick from {' / '.join(allowed_for_buy)}."
 
     return f"""
 CURRENT PRICES (only tradeable pairs shown):
