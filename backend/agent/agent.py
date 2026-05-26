@@ -12,11 +12,14 @@ from monitor.leaderboard import LeaderboardMonitor
 
 
 class TradingAgent:
-    def __init__(self, portfolio=None):
+    def __init__(self, portfolio=None, lb=None):
         self.analyzer       = PriceAnalyzer()
         self.state          = AgentState()
         self.dex            = DreamDEX()
-        self.lb             = LeaderboardMonitor()
+        # R6: re-use the running LeaderboardMonitor from main.py instead of
+        # spinning up a new (never-started) one. Auto-flip rank check needs a
+        # live my_rank value; the default-init instance returns "?" forever.
+        self.lb             = lb if lb is not None else LeaderboardMonitor()
         self.portfolio      = portfolio  # C2: source of truth for capital-floor check
         self.running        = False
         self.paused         = False
@@ -73,6 +76,24 @@ class TradingAgent:
             time.sleep(self.loop_secs)
 
     def _tick(self):
+        # R5: auto-flip mode based on rank — runs FIRST, before any early-return
+        # gates (capital floor, max orders), so the flip happens even when the
+        # agent is holding.
+        try:
+            from agent import brain as _brain
+            lb_stats = self.lb.get_my_stats() if self.lb else {}
+            current_mode = _brain.get_mode()
+            rank = lb_stats.get("my_rank")
+            if isinstance(rank, int):
+                if rank <= 2 and current_mode == "grind":
+                    print(f"[agent] 🎯 Rank ≤ 2 reached (#{rank}) — auto-flip grind → profit")
+                    _brain.set_mode("profit")
+                elif rank > 3 and current_mode == "profit":
+                    print(f"[agent] 📉 Rank slipped to #{rank} — auto-flip profit → grind")
+                    _brain.set_mode("grind")
+        except Exception as e:
+            print(f"[agent] mode-flip check failed: {e}")
+
         # 0. Max-orders cap (0 = unlimited)
         tx_done = self.state.summary().get("tx_count", 0)
         if self.max_orders and tx_done >= self.max_orders:
@@ -207,26 +228,32 @@ class TradingAgent:
                 pool = self.dex.wallet.w3.eth.contract(address=pool_addr, abi=vault_abi)
 
                 if action == "buy":
-                    # C5: size deposit at the SAME price the order will use (best ask + tick),
-                    # not mid*1.15 — that buffer is wildly over-conservative AND wrong when
-                    # the book is thin (real ask can be > mid*1.15). Match place_order logic.
+                    # C5: size deposit at the SAME price the order will use (best ask + tick).
                     tick = float(mkt.get("tickSize", 0.0001))
                     book = self.dex.get_orderbook(pair)
                     best_ask = book.get("ask") or 0
-                    if best_ask:
-                        raw_price = best_ask + tick
-                    else:
-                        # Empty book — order will reject anyway, but estimate from mid for the deposit.
-                        raw_price = mid + tick
+                    raw_price = (best_ask + tick) if best_ask else (mid + tick)
                     limit_price = round(round(raw_price / tick) * tick, 6)
 
                     decimals = mkt["quoteDecimals"]
-                    # Add 2% buffer for slippage between deposit and execution (down from 15%).
                     raw_needed = int(qty * limit_price * 1.02 * (10 ** decimals))
                     raw_bal = pool.functions.getWithdrawableBalance(self.dex.wallet.address, quote_addr).call()
                     if raw_bal < raw_needed:
-                        deficit = (raw_needed - raw_bal) / (10 ** decimals)
-                        deficit = round(deficit * 1.01, 4)
+                        # Affordability check: vault + wallet USDso must cover the deposit.
+                        wallet_quote = self.dex.wallet.erc20_balance(mkt["quote"], decimals)
+                        wallet_raw = int(wallet_quote * (10 ** decimals))
+                        if raw_bal + wallet_raw < raw_needed:
+                            affordable_qty = ((raw_bal + wallet_raw) / (10 ** decimals)) / (limit_price * 1.02)
+                            affordable_qty = round(round(affordable_qty / lot) * lot, 8)
+                            if affordable_qty < min_qty:
+                                print(f"[agent] ⚠️  BUY {pair} unaffordable: vault {raw_bal/(10**decimals):.4f} + wallet {wallet_quote:.4f} USDso < need {raw_needed/(10**decimals):.4f}. Skipping.")
+                                result = {"status": "skipped", "reason": "insufficient quote (wallet+vault)"}
+                                self._log({**decision, "qty": qty, "result": result, "mid": mid})
+                                return
+                            print(f"[agent] ⚠️  Resizing BUY {pair} from {qty} → {affordable_qty} to match wallet+vault.")
+                            qty = affordable_qty
+                            raw_needed = int(qty * limit_price * 1.02 * (10 ** decimals))
+                        deficit = round((raw_needed - raw_bal) / (10 ** decimals) * 1.01, 4)
                         print(f"[agent] Vault deficit for buy (limit {limit_price}, 2% buf): {deficit} USDso. Depositing...")
                         self.dex.vault_deposit(pair, mkt["quote"], deficit)
                 elif action == "sell":
@@ -234,12 +261,32 @@ class TradingAgent:
                     raw_needed = int(qty * (10 ** decimals))
                     raw_bal = pool.functions.getWithdrawableBalance(self.dex.wallet.address, base_addr).call()
                     if raw_bal < raw_needed:
-                        deficit = (raw_needed - raw_bal) / (10 ** decimals)
-                        deficit = round(deficit * 1.01, 8)
+                        # Affordability check for sells: vault base + wallet base must cover the deposit.
+                        # For native pools (e.g. SOMI), wallet base = native_balance minus gas reserve.
+                        if mkt.get("native"):
+                            wallet_base = max(0.0, self.dex.wallet.native_balance() - 0.05)
+                        else:
+                            wallet_base = self.dex.wallet.erc20_balance(mkt["base"], decimals)
+                        wallet_raw = int(wallet_base * (10 ** decimals))
+                        if raw_bal + wallet_raw < raw_needed:
+                            affordable_qty = (raw_bal + wallet_raw) / (10 ** decimals)
+                            affordable_qty = round(round(affordable_qty / lot) * lot, 8)
+                            if affordable_qty < min_qty:
+                                print(f"[agent] ⚠️  SELL {pair} unfundable: vault {raw_bal/(10**decimals):.6f} + wallet {wallet_base:.6f} base < need {raw_needed/(10**decimals):.6f}. Skipping (no SOMI to round-trip).")
+                                result = {"status": "skipped", "reason": "no base inventory to sell"}
+                                self._log({**decision, "qty": qty, "result": result, "mid": mid})
+                                return
+                            print(f"[agent] ⚠️  Resizing SELL {pair} from {qty} → {affordable_qty} to match wallet+vault.")
+                            qty = affordable_qty
+                            raw_needed = int(qty * (10 ** decimals))
+                        deficit = round((raw_needed - raw_bal) / (10 ** decimals) * 1.01, 8)
                         print(f"[agent] Vault deficit for sell: {deficit} base. Depositing...")
                         self.dex.vault_deposit(pair, mkt["base"], deficit)
             except Exception as e:
                 print(f"[agent] Error checking/depositing to vault: {e}")
+                result = {"status": "skipped", "reason": f"vault check failed: {e}"}
+                self._log({**decision, "qty": qty, "result": result, "mid": mid})
+                return
 
         # Submit via DreamDEX API
         result = self.dex.place_order(
@@ -259,8 +306,40 @@ class TradingAgent:
         # or can't be authoritatively confirmed.
         if result.get("status") == "success":
             self.state.record_trade(log_entry)
+            # R4: drain quote vault back to wallet after every SELL.
+            # The contest leaderboard counts wallet USDso only (not vault).
+            # Without this drain each sell parks ~$2 in the vault and the agent
+            # silently bleeds wallet runway despite "profitable" round-trips.
+            if action == "sell":
+                self._drain_quote_vault(pair)
         else:
             print(f"[agent] Skipping state update — order result: {result.get('status')}")
+
+    def _drain_quote_vault(self, pair: str, min_drain: float = 0.10):
+        """Withdraw whatever USDso is sitting in the pool's quote vault back
+        to the wallet. min_drain avoids wasting gas on dust."""
+        try:
+            from web3 import Web3
+            from config import MARKETS, USDSO_ADDRESS
+            mkt = MARKETS.get(pair)
+            if not mkt:
+                return
+            pool_addr = Web3.to_checksum_address(mkt["contract"])
+            quote_addr = Web3.to_checksum_address(mkt["quote"])
+            abi = [{"name": "getWithdrawableBalance", "type": "function", "stateMutability": "view",
+                    "inputs": [{"name": "u", "type": "address"}, {"name": "t", "type": "address"}],
+                    "outputs": [{"name": "", "type": "uint256"}]}]
+            pool = self.dex.wallet.w3.eth.contract(address=pool_addr, abi=abi)
+            raw = pool.functions.getWithdrawableBalance(self.dex.wallet.address, quote_addr).call()
+            human = raw / (10 ** int(mkt.get("quoteDecimals", 18)))
+            if human < min_drain:
+                return
+            # withdraw 99.9% to avoid rounding-up issues
+            amount = round(human * 0.999, 6)
+            print(f"[agent] 💸 Auto-drain {pair}: pulling ${amount:.4f} USDso vault → wallet")
+            self.dex.vault_withdraw(pair, mkt["quote"], amount)
+        except Exception as e:
+            print(f"[agent] auto-drain {pair} failed: {e}")
 
     def _log(self, entry: dict):
         import os

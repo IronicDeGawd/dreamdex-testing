@@ -46,7 +46,8 @@ def main():
     portfolio = Portfolio()
     manual    = ManualTrader()
     # C2: agent reads capital from on-chain Portfolio, not local AgentState.
-    agent     = TradingAgent(portfolio=portfolio)
+    # R6: share the leaderboard monitor so the agent's auto-flip sees real ranks.
+    agent     = TradingAgent(portfolio=portfolio, lb=lb)
 
     # Wire: prices → agent analyzer
     prices.add_subscriber(agent.on_price_update)
