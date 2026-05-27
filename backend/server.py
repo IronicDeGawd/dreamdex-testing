@@ -32,14 +32,15 @@ def require_api_key():
 
 # These are injected from main.py
 _agent    = None
+_micro    = None   # optional peer/sub agent
 _prices   = None
 _lb       = None
 _portfolio= None
 _manual   = None
 
-def init(agent, prices, lb, portfolio, manual):
-    global _agent, _prices, _lb, _portfolio, _manual
-    _agent=agent; _prices=prices; _lb=lb
+def init(agent, prices, lb, portfolio, manual, micro=None):
+    global _agent, _micro, _prices, _lb, _portfolio, _manual
+    _agent=agent; _micro=micro; _prices=prices; _lb=lb
     _portfolio=portfolio; _manual=manual
     # C1: refuse mainnet start with empty key — fail closed instead of fail open.
     if ENV == "mainnet" and not FLASK_API_KEY:
@@ -64,8 +65,15 @@ def prices():
 
 @app.route("/agent")
 def agent_status():
-    """Agent status — what it's doing right now"""
+    """Main agent status — what it's doing right now"""
     return jsonify(_agent.get_status())
+
+@app.route("/agent/micro")
+def agent_micro_status():
+    """Sub-agent (micro) status. 404 when no parallel agent is running."""
+    if _micro is None:
+        return jsonify({"error": "no micro agent configured"}), 404
+    return jsonify(_micro.get_status())
 
 @app.route("/portfolio")
 def portfolio():

@@ -32,10 +32,16 @@ def _conn() -> sqlite3.Connection:
 
 
 def init():
-    """Create tables if missing. Safe to call on every boot."""
+    """Create tables if missing + add any new columns on existing DBs.
+
+    Order matters: tables first, then a column-existence check that adds
+    `agent_name` on older DBs, then indexes (which reference that column).
+    Doing the index in the initial CREATE script would crash before the
+    migration ran on pre-`agent_name` databases.
+    """
     with _LOCK, _conn() as c:
-        c.executescript(
-            """
+        # 1) Tables — create if absent. Includes agent_name for fresh DBs.
+        c.execute("""
             CREATE TABLE IF NOT EXISTS trades (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts           REAL    NOT NULL,
@@ -49,11 +55,11 @@ def init():
                 vault_delta  TEXT,
                 reason       TEXT,
                 confidence   INTEGER,
-                mode         TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);
-            CREATE INDEX IF NOT EXISTS idx_trades_pair_status ON trades(pair, status);
-
+                mode         TEXT,
+                agent_name   TEXT DEFAULT 'main'
+            )
+        """)
+        c.execute("""
             CREATE TABLE IF NOT EXISTS market_ticks (
                 ts          REAL    NOT NULL,
                 pair        TEXT    NOT NULL,
@@ -62,25 +68,40 @@ def init():
                 ask         REAL,
                 momentum_30m REAL,
                 PRIMARY KEY (ts, pair)
-            );
-            CREATE INDEX IF NOT EXISTS idx_ticks_pair_ts ON market_ticks(pair, ts);
-            """
-        )
+            )
+        """)
+
+        # 2) Migration — add agent_name to pre-existing tables.
+        try:
+            cols = {row[1] for row in c.execute("PRAGMA table_info(trades)").fetchall()}
+            if "agent_name" not in cols:
+                c.execute("ALTER TABLE trades ADD COLUMN agent_name TEXT DEFAULT 'main'")
+                print("[db] migrated trades table: added agent_name column")
+        except Exception as e:
+            print(f"[db] agent_name migration failed: {e}")
+
+        # 3) Indexes — safe now that agent_name exists.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_trades_pair_status ON trades(pair, status)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_trades_agent ON trades(agent_name)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ticks_pair_ts ON market_ticks(pair, ts)")
 
 
 # ── Writes ────────────────────────────────────────────────────────────
 
-def record_trade(entry: dict, mode: str = "grind") -> None:
+def record_trade(entry: dict, mode: str = "grind", agent_name: str = "main") -> None:
     """Called from agent._execute on every trade attempt (success or skip).
-    `entry` is the same log_entry the agent already builds."""
+    `entry` is the same log_entry the agent already builds.
+    `agent_name` lets parallel agents (main, micro, manual) keep their rows
+    distinguishable for per-agent stats and per-agent history feedback."""
     res = entry.get("result", {}) or {}
     try:
         with _LOCK, _conn() as c:
             c.execute(
                 """INSERT INTO trades
                    (ts, action, pair, qty, amount_usdso, price, status, tx_hash,
-                    vault_delta, reason, confidence, mode)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    vault_delta, reason, confidence, mode, agent_name)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     time.time(),
                     entry.get("action", ""),
@@ -94,6 +115,7 @@ def record_trade(entry: dict, mode: str = "grind") -> None:
                     entry.get("reason"),
                     int(entry.get("confidence") or 0),
                     mode,
+                    agent_name,
                 ),
             )
     except Exception as e:
@@ -127,15 +149,26 @@ def record_tick(prices: dict, momentum: dict) -> None:
 
 # ── Reads (used by brain prompt + /agent/stats) ────────────────────────
 
-def last_trades(limit: int = 20) -> list[dict]:
+def last_trades(limit: int = 20, agent_name: str | None = None) -> list[dict]:
+    """Newest-first trade rows. When agent_name is set, filter to that
+    agent only — each parallel agent reads its own history so the
+    brain's round-trip rule doesn't cross-contaminate."""
     try:
         with _LOCK, _conn() as c:
-            rows = c.execute(
-                """SELECT ts, action, pair, qty, amount_usdso, price, status,
-                          reason, confidence, mode
-                   FROM trades ORDER BY id DESC LIMIT ?""",
-                (limit,),
-            ).fetchall()
+            if agent_name:
+                rows = c.execute(
+                    """SELECT ts, action, pair, qty, amount_usdso, price, status,
+                              reason, confidence, mode, agent_name
+                       FROM trades WHERE agent_name = ? ORDER BY id DESC LIMIT ?""",
+                    (agent_name, limit),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    """SELECT ts, action, pair, qty, amount_usdso, price, status,
+                              reason, confidence, mode, agent_name
+                       FROM trades ORDER BY id DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
             return [dict(r) for r in rows]
     except Exception as e:
         print(f"[db] last_trades failed: {e}")

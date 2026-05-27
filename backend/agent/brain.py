@@ -152,12 +152,199 @@ Respond ONLY with valid JSON, same shape as before:
 }
 """
 
-def _system_prompt() -> str:
-    return PROFIT_PROMPT if AGENT_MODE == "profit" else GRIND_PROMPT
+def _system_prompt(mode_override: str | None = None) -> str:
+    """Picks PROFIT vs GRIND. mode_override takes precedence (used by the
+    micro-agent which is hard-pinned to profit regardless of global flag)."""
+    effective = mode_override or AGENT_MODE
+    return PROFIT_PROMPT if effective == "profit" else GRIND_PROMPT
+
+
+# Combined orchestrator prompt: ONE LLM call decides BOTH agents' next moves.
+# This is the "Plan B" path — saves a call per cycle and lets the model
+# coordinate sizing/pair selection across the two execution lanes.
+ORCHESTRATOR_PROMPT = """
+You are the orchestrator for TWO trading agents sharing one wallet on
+DreamDEX mainnet:
+  • MAIN agent  — primary executor. Mode follows the global setting
+                  (GRIND for volume, PROFIT for momentum). Trade size
+                  $7–$15. Larger swings = more volume per fill.
+  • MICRO agent — always-on profit hunter. Trade size $2–$5. Smaller
+                  trades so we keep firing fills while the main agent
+                  waits for bigger setups.
+
+Both agents share one EOA wallet, one USDso balance, and one nonce lane.
+You MUST coordinate to avoid stupid conflicts:
+  - If MAIN is opening a position on pair X, MICRO should pick a
+    DIFFERENT pair this tick (no double-down).
+  - If a pair is in the AVOID block, neither agent picks it this tick.
+  - Combined cash needed (MAIN buy + MICRO buy) must not exceed wallet
+    USDso minus $20 floor.
+  - Each agent independently obeys its own ROUND-TRIP rule (if its
+    last successful action was a BUY of X, its next non-hold action
+    must be a SELL of X).
+
+Allowed pairs: SOMI:USDso, USDC.e:USDso, WETH:USDso. Never WBTC.
+
+Modes:
+  - GRIND: HOLD is almost never correct. If at least one allowed pair is
+    not in the avoid list and wallet > floor, trade something.
+  - PROFIT: HOLD when no pair has 30-min momentum past 0.3%. Otherwise
+    trade with the direction (BUY on dip, SELL on pump or to close).
+
+Respond ONLY with valid JSON, no markdown:
+{
+  "main": {
+    "action": "buy" | "sell" | "hold",
+    "pair":   "SOMI:USDso" | "USDC.e:USDso" | "WETH:USDso",
+    "amount_usdso": <float in [7.0, 15.0]>,
+    "reason": "<max 10 words>",
+    "confidence": <int 0-100>
+  },
+  "micro": {
+    "action": "buy" | "sell" | "hold",
+    "pair":   "SOMI:USDso" | "USDC.e:USDso" | "WETH:USDso",
+    "amount_usdso": <float in [2.0, 5.0]>,
+    "reason": "<max 10 words>",
+    "confidence": <int 0-100>
+  }
+}
+"""
+
+
+def decide_pair(prices: dict, balances: dict,
+                main_history: list, micro_history: list,
+                leaderboard: dict,
+                db_pnl: dict | None = None,
+                main_mode_override: str | None = None) -> dict:
+    """One LLM call → two decisions (main + micro). Returns
+    {"main": <decision-dict>, "micro": <decision-dict>}. On error, both
+    fall back to HOLD."""
+    openai_key = os.environ.get("OPENAI_KEY", "")
+    if not openai_key or openai_key == "disable":
+        return {
+            "main":  {"action": "hold", "reason": "no LLM key", "confidence": 100},
+            "micro": {"action": "hold", "reason": "no LLM key", "confidence": 100},
+        }
+
+    user_msg = _build_orchestrator_prompt(
+        prices, balances, main_history, micro_history, leaderboard,
+        db_pnl or {}, main_mode_override,
+    )
+
+    try:
+        resp = requests.post(
+            f"{OPENAI_API}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {os.environ['OPENAI_KEY']}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": OPENAI_MODEL,
+                "messages": [
+                    {"role": "system", "content": ORCHESTRATOR_PROMPT},
+                    {"role": "user",   "content": user_msg},
+                ],
+                "temperature": 0,
+                "max_tokens": 400,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=15,
+        )
+        raw = resp.json()["choices"][0]["message"]["content"]
+        out = json.loads(raw)
+        # Defensive: ensure both sub-dicts exist + have order_type/limit_price.
+        for k in ("main", "micro"):
+            d = out.get(k) or {}
+            d.setdefault("action", "hold")
+            d.setdefault("order_type", "market")
+            d.setdefault("limit_price", None)
+            d.setdefault("confidence", 0)
+            if d.get("confidence", 0) < AGENT_CONFIDENCE_MIN and d.get("action") != "hold":
+                d["action"] = "hold"
+                d["reason"] = "low confidence"
+            out[k] = d
+        return out
+    except Exception as e:
+        print(f"[brain] orchestrator decide_pair error: {e}")
+        return {
+            "main":  {"action": "hold", "reason": "api error", "confidence": 0},
+            "micro": {"action": "hold", "reason": "api error", "confidence": 0},
+        }
+
+
+def _build_orchestrator_prompt(prices, balances, main_history, micro_history,
+                               lb, db_pnl, main_mode_override) -> str:
+    momentum = {}
+    for pair, pdata in prices.items():
+        h = pdata.get("history", [])
+        if len(h) >= 6 and h[-6]["mid"] > 0:
+            momentum[pair] = round((h[-1]["mid"] - h[-6]["mid"]) / h[-6]["mid"] * 100, 3)
+        else:
+            momentum[pair] = 0.0
+
+    def _rt_hint(history, label):
+        for t in reversed(history or []):
+            if t.get("status") == "success":
+                act, pair = t.get("action"), t.get("pair", "")
+                if act == "buy":
+                    return f"  {label}: last successful BUY {pair} — next non-hold MUST be SELL {pair}"
+                if act == "sell":
+                    return f"  {label}: last successful SELL {pair} — round-trip closed, may BUY fresh"
+        return f"  {label}: no recent trades — may start a fresh BUY"
+
+    def _fails(history):
+        FAILS = {"would_revert","silent_reject","placed_unfilled","reverted","unverified"}
+        by_pair = {}
+        for t in (history or [])[:10]:
+            by_pair.setdefault(t.get("pair"), []).append(t.get("status",""))
+        return [p for p, ss in by_pair.items()
+                if p and len(ss) >= 2 and all(s in FAILS for s in ss[:3])]
+
+    avoid_main  = _fails(main_history)
+    avoid_micro = _fails(micro_history)
+    avoid_block = "  main avoid: " + (",".join(avoid_main) or "—") + \
+                  "  micro avoid: " + (",".join(avoid_micro) or "—")
+
+    effective_main_mode = main_mode_override or AGENT_MODE
+    pnl_lines = _pnl_lines(db_pnl) if db_pnl else "  none"
+
+    return f"""
+CURRENT PRICES:
+  SOMI:   ${prices.get('SOMI:USDso',  {}).get('mid', 0):.5f}  ({momentum.get('SOMI:USDso',  0):+.2f}% / 30min)
+  USDC.e: ${prices.get('USDC.e:USDso',{}).get('mid', 0):.5f}  ({momentum.get('USDC.e:USDso',0):+.2f}% / 30min)
+  WETH:   ${prices.get('WETH:USDso',  {}).get('mid', 0):.2f}  ({momentum.get('WETH:USDso',  0):+.2f}% / 30min)
+
+SHARED WALLET:
+  USDso (free):   ${balances.get('usdso', 0):.4f}
+  native SOMI:    {balances.get('somi',  0):.4f}
+  Floor:          $20.00 (combined buys must leave > floor)
+
+MAIN AGENT MODE: {effective_main_mode.upper()}  (size $7–$15)
+MICRO AGENT MODE: PROFIT (size $2–$5, locked)
+
+ROUND-TRIP STATE:
+{_rt_hint(main_history, 'MAIN')}
+{_rt_hint(micro_history, 'MICRO')}
+
+PAIRS TO AVOID THIS TICK (recent failures):
+{avoid_block}
+
+PER-PAIR NET PnL (last 24h, fills only):
+{pnl_lines}
+
+LEADERBOARD:
+  My rank:   #{lb.get('my_rank', '?')} of {lb.get('total', 0)}
+  Volume:    ${lb.get('my_volume', 0):.2f}
+  Fills:     {lb.get('my_fills', 0)}
+  Signal:    {lb.get('signal', '-')}
+
+Decide BOTH agents' next moves. Pick different pairs when both BUY.
+"""
 
 def decide(prices: dict, positions: dict, balances: dict,
            history: list, leaderboard: dict,
-           db_history: list | None = None, db_pnl: dict | None = None) -> dict:
+           db_history: list | None = None, db_pnl: dict | None = None,
+           mode_override: str | None = None) -> dict:
     """
     Ask GPT-4o-mini what to do right now.
     Returns parsed decision dict or {"action": "hold"} on error.
@@ -211,7 +398,7 @@ def decide(prices: dict, positions: dict, balances: dict,
             json={
                 "model": OPENAI_MODEL,
                 "messages": [
-                    {"role": "system", "content": _system_prompt()},
+                    {"role": "system", "content": _system_prompt(mode_override)},
                     {"role": "user",   "content": user_msg},
                 ],
                 "temperature": 0,      # deterministic

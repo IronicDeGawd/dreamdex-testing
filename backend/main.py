@@ -51,21 +51,45 @@ def main():
     lb        = LeaderboardMonitor()
     portfolio = Portfolio()
     manual    = ManualTrader()
-    # C2: agent reads capital from on-chain Portfolio, not local AgentState.
-    # R6: share the leaderboard monitor so the agent's auto-flip sees real ranks.
-    agent     = TradingAgent(portfolio=portfolio, lb=lb)
 
-    # Wire: prices → agent analyzer
+    # R9: parallel-agent orchestrator setup.
+    # ONE DreamDEX (and therefore one SomniaWallet + one nonce lock) is shared
+    # between both agents. The main agent runs the LLM loop (decide_pair, single
+    # OpenAI call per tick) and forwards the second decision to the micro agent.
+    # The micro agent is `brainless`: no autonomous loop, only executes what
+    # the orchestrator hands it. Hard-pinned to PROFIT mode.
+    from trading.dreamdex import DreamDEX
+    from config import (MICRO_AGENT_MIN_TRADE, MICRO_AGENT_MAX_TRADE,
+                        MICRO_AGENT_LOOP_SECS)
+    shared_dex = DreamDEX()
+    micro_agent = TradingAgent(
+        portfolio=portfolio, lb=lb, dex=shared_dex,
+        name="micro",
+        min_trade=MICRO_AGENT_MIN_TRADE,
+        max_trade=MICRO_AGENT_MAX_TRADE,
+        loop_secs=MICRO_AGENT_LOOP_SECS,
+        fixed_mode="profit",
+        brainless=True,
+    )
+    agent = TradingAgent(
+        portfolio=portfolio, lb=lb, dex=shared_dex,
+        name="main",
+        peer_agent=micro_agent,   # main is the orchestrator
+    )
+
+    # Wire: prices → both agents' analyzers
     prices.add_subscriber(agent.on_price_update)
+    prices.add_subscriber(micro_agent.on_price_update)
 
-    # Wire Flask
-    server.init(agent, prices, lb, portfolio, manual)
+    # Wire Flask (both agents)
+    server.init(agent, prices, lb, portfolio, manual, micro=micro_agent)
 
     # Start background threads
     prices.start()      # REST poll every 30s
     lb.start()          # leaderboard every 5min
     portfolio.start()   # on-chain balance every 60s
-    agent.start()       # AI loop every 5min
+    micro_agent.start() # brainless — no thread spawned, just marks running=True
+    agent.start()       # main loop drives both agents
 
     # Flask blocks main thread
     server.run()
