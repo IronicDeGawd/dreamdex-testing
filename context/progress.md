@@ -6,6 +6,9 @@ Stack: Python 3.11 + Flask + web3.py agent backend (Docker `network_mode: host`)
 
 ## Completed
 
+### 2026-05-27 15:30 — Outcome-aware activity log + avoid-list for failing pairs (commit `f0da9b5`)
+Trade result status now attached to each `last_decision` in the `/agent` endpoint. Activity log icons now reflect outcome, not intent: 🟢 BUY landed, 🔴 SELL landed, 🟡 sim-rejected (would_revert), 🟠 silent_reject / placed_unfilled / reverted, ⏸ HOLD, ⚪ unknown. Log waits one poll for `result_status` to populate so each entry shows final outcome. Brain's `_build_prompt` scans last 10 DB rows per pair and emits explicit `PAIRS TO AVOID THIS TICK` block when a pair's last 2+ attempts returned failure statuses (would_revert / silent_reject / placed_unfilled / reverted / unverified). GRIND prompt's hard rules reference this block so LLM rotates off failing pairs. First post-restart decision returned would_revert for SOMI — avoid-list will rotate to different pair next tick.
+
 ### 2026-05-27 14:24 — Hard-clamp min trade to $7, dashboard contrast invert (commit `f9ae085`)
 `AGENT_MIN_TRADE` bumped 0.10 → 7.00 in `backend/config.py`. The agent's `max(MIN, min(MAX, amt))` clamp now guarantees every trade lands in [$7, $8], regardless of LLM output. Brain prompt updated to state $7 as hard floor (was picking $5 despite "$7–$8 sweet spot" guidance). Static palette inverted: outer body now white-ish `--c-bg #f4f4f4` with `--c-page-text #111`; panel interiors stay dark (`--c-surface #0d0d0d`, `--c-text #f5f5f5`). First decision post-restart: `BUY SOMI $8.00` (full cap). Verified: `docker exec` reports `min=$7.0 max=$8.0`.
 
@@ -96,6 +99,7 @@ Rewrote full commit history via `git-filter-repo --replace-text` to redact sensi
 - **OrderPlaced events emit `filled=0` even on real fills.** Don't trust `filled` field from on-chain logs. Use vault-balance delta (pre vs post `getWithdrawableBalance`) as the authoritative signal.
 - **Decimal field renames require grep cleanup.** When refactoring (e.g., `dec` → `decLog`), easy to miss a reference and silently pass wrong args to `Decimal()`. Always grep the old name to verify full migration.
 - **WBTC is 8 decimals on dreamDEX, not 18.** USDC.e is 6. The agent's MARKETS dict encodes this; if you hardcode elsewhere, order quantities will be orders of magnitude off.
+- **Outcome-aware log icons matter when the same action can have wildly different outcomes.** When "BUY SOMI" can mean a real on-chain buy, a sim rejection, or a placement that never fills, the user sees three identical entries and assumes three different things happened. Surface the final status to the user, not the intent. Use distinct icons (🟢/🔴/🟡/🟠) per outcome, not side. Log should wait for result_status to populate so users read accurate history, not speculative narrative.
 
 ## Resume From Here
 
