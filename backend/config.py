@@ -21,9 +21,16 @@ AGENT_CAPITAL   = 30.0
 MANUAL_CAPITAL  = 20.0
 
 # ── Agent Risk Rules ──────────────────────────────────────
-AGENT_MIN_TRADE      = 7.00   # any LLM-emitted amount below this is clamped up — every fill is worth volume, but small fills waste tx slots
-AGENT_MAX_TRADE      = 8.0
-AGENT_STOP_BELOW     = 30.0
+AGENT_MIN_TRADE      = 7.00   # main agent min — any LLM-emitted amount below is clamped up
+AGENT_MAX_TRADE      = 15.0   # main agent cap; supports bigger volume per fill
+AGENT_STOP_BELOW     = 20.0   # capital floor; lowered to leave room for $15 main + $5 micro concurrent exposure
+
+# Micro-agent (parallel, same wallet, shared nonce). Smaller faster trades so
+# the leaderboard sees a steady stream of fills alongside the main agent's
+# bigger swings.
+MICRO_AGENT_MIN_TRADE = 2.0
+MICRO_AGENT_MAX_TRADE = 5.0
+MICRO_AGENT_LOOP_SECS = 90    # faster than main to keep tx-count rising
 AGENT_CONFIDENCE_MIN = 65
 MAX_CONCURRENT_POS   = 3
 # Hard cap on total trades the agent will execute before auto-holding.
