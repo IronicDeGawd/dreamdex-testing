@@ -22,8 +22,8 @@ MANUAL_CAPITAL  = 20.0
 
 # ── Agent Risk Rules ──────────────────────────────────────
 AGENT_MIN_TRADE      = 0.10
-AGENT_MAX_TRADE      = 5.0
-AGENT_STOP_BELOW     = 35.0
+AGENT_MAX_TRADE      = 8.0
+AGENT_STOP_BELOW     = 30.0
 AGENT_CONFIDENCE_MIN = 65
 MAX_CONCURRENT_POS   = 3
 # Hard cap on total trades the agent will execute before auto-holding.
