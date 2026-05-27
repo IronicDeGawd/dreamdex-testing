@@ -21,7 +21,7 @@ AGENT_CAPITAL   = 30.0
 MANUAL_CAPITAL  = 20.0
 
 # ── Agent Risk Rules ──────────────────────────────────────
-AGENT_MIN_TRADE      = 0.10
+AGENT_MIN_TRADE      = 7.00   # any LLM-emitted amount below this is clamped up — every fill is worth volume, but small fills waste tx slots
 AGENT_MAX_TRADE      = 8.0
 AGENT_STOP_BELOW     = 30.0
 AGENT_CONFIDENCE_MIN = 65
