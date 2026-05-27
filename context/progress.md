@@ -6,6 +6,15 @@ Stack: Python 3.11 + Flask + web3.py agent backend (Docker `network_mode: host`)
 
 ## Completed
 
+### 2026-05-27 14:22 — Theme() CSS variable swap, modal style rebuild (commit `d1eb25a`)
+Tailwind CDN's plain `<style>` blocks were not reliably resolving `theme()` calls, leaving modal headers and confirmation buttons with broken styles. Replaced every `theme()` with `:root` CSS variables (`--c-bg`, `--c-surface`, `--c-border`, `--c-text`, `--c-muted`, `--c-danger`, `--c-success`, `--c-warning`). New `.modal-card`, `.modal-overlay`, `.btn-primary`, `.btn-warning`, `.btn-danger` classes use CSS variables with inline fallbacks. Bumped panel surface #111 → #1a1a1a and text → #f5f5f5 for visible separation from page background.
+
+### 2026-05-27 14:20 — Manual trades mirror to SQLite memory (commit `6b97aaf`)
+`ManualTrader.execute` was bypassing the agent's `_log`, so manual trades from the dashboard or watch never reached sqlite. Added `db.record_trade(..., mode="manual")` inside the manual trade path. Verified: a manual $2 SOMI SELL now shows in `/agent/stats` last_trades with `mode=manual` and `status=success`.
+
+### 2026-05-27 14:18 — Trade cap bump to $8, floor lowered to $30 (commit `54db550`)
+Wallet steady at ~$44.50 provides headroom. Bumped `AGENT_MAX_TRADE` from 5.0 to 8.0 (+60% volume per round-trip), lowered `AGENT_STOP_BELOW` from 35.0 to 30.0. Brain prompt bias updated toward $7–$8 per trade. Mid-cycle exposure ~$36.50 with ~$6.50 buffer above floor. Rank #3 of 11, volume $330 (trader-6 at rank #2 with $586).
+
 ### 2026-05-27 — Three-state mode (GRIND / PROFIT / AUTO), sticky manual overrides (commit `04db1af`)
 Mode system upgraded from 2-state to 3-state. GRIND and PROFIT are now manual sticky overrides that disable auto-flip (set `auto=false`); AUTO re-enables rank-based behavior. Previously rank-based flip was always on, causing oscillation when leaderboard rank flickered at the 2/3 boundary. Now `brain.set_mode("grind"|"profit")` locks the mode and prevents rank-based flips until `set_mode("auto")` is called. `/agent/mode` GET returns `{mode, auto, selected}` (selected = user pick, mode = effective). Dashboard adds AUTO button; when AUTO is selected, shows live effective mode in parens (e.g. "AUTO (GRI)"). Currently mode locked to GRIND (sticky, auto=false), fast 120s loop, agent holds grind regardless of rank wobble.
 
@@ -71,6 +80,8 @@ Rewrote full commit history via `git-filter-repo --replace-text` to redact sensi
 
 ## Lessons
 
+- **CSS `theme()` calls don't resolve in plain `<style>` blocks loaded via Tailwind CDN.** When the Tailwind build doesn't happen at server startup, browsers can't find theme references. Use `:root` CSS variables with hard-coded hex values instead. This guarantees specificity wins even with `!important` overrides for `:active`-style states.
+- **Every code path that writes to the chain must also write to the analysis database.** If `ManualTrader.execute` skips `db.record_trade()` while `TradingAgent._log` always calls it, manual trades vanish from stats. Grep for all trade-execution paths (manual, automated, signal-based) and ensure every one records to the same DB table. This is load-bearing for accuracy metrics and LLM context.
 - **Hysteresis flips need an explicit opt-in flag when manual overrides exist.** Rank-based auto-flips work for fully automatic systems, but when you add sticky manual mode-locks (e.g., lock to GRIND, disable auto-flip), the auto flip becomes a distraction — users expect their manual pick to stick until explicitly overridden. Solution: add an `auto` flag (default true); set_mode("grind"/"profit") sets `auto=false`, re-enabling requires explicit set_mode("auto"). This prevents rank wobble from fighting user intent.
 - **Off-by-one hysteresis at tier boundaries.** If a threshold like `rank > 3` keeps a tier (rank #3) stuck at the boundary with no recovery path, flip it to `rank > 2`. A tier that needs action to recover shouldn't be locked out of taking that action. No hysteresis gap needed — immediate flip is correct.
 - **Wallet-funded only.** Vault-funded IOC buys on dreamDEX mainnet never fill — USDso reserved then refunded 5–10 min later. Wallet-funded fills normally. This is the ONLY path that works on mainnet; never retry vault-funded as a fallback.
@@ -84,31 +95,19 @@ Rewrote full commit history via `git-filter-repo --replace-text` to redact sensi
 
 ## Resume From Here
 
-**Mode now sticky-GRIND (auto=false, rank-flips disabled) — agent holds trading strategy regardless of leaderboard rank wobble.** Three-state mode system live: manual overrides (GRIND/PROFIT) lock the mode and disable auto-flip; AUTO re-enables rank-based behavior. SQLite memory is live; agent records every tick + trade to `/app/data/agent.db` (survives rebuilds). Prompt reads LAST N DECISIONS from DB + PER-PAIR NET PnL. New `/agent/stats` endpoint shows totals, 24h per-pair PnL, and last 20 trades. Dashboard has AUTO button; when selected, shows live effective mode in parens. Current wallet $44.49 USDso + 16.4 SOMI, volume $330 (rank #3 of 11).
+**Three fixes deployed: CSS variable swap (theme() reliability), manual trade DB mirroring, and trade sizing bump ($8 cap, $30 floor).** Agent running GRIND (sticky, auto=false), loop 120s, rank #3 of 11 (~$330 volume). Wallet $44.50 USDso + ~47 SOMI; mid-cycle exposure ~$36.50 with ~$6.50 buffer. Manual SELL pathway verified via `/agent/stats`. Target: rank #2 (~$256 more volume).
 
 ### Next steps
-1. **Monitor sticky grind mode.** With auto=false, agent stays in grind regardless of rank swings at 2/3 boundary. Verify volume grows without oscillation.
-2. **Watch dashboard mode display.** When AUTO is selected, verify the mode badge shows effective state (e.g. "AUTO (GRI)" or "AUTO (PRO)").
-3. **Test manual mode toggles.** Switch GRIND → PROFIT → AUTO via dashboard API and confirm `/agent/mode` returns correct `{mode, auto, selected}` tuple.
+1. **Monitor volume climb.** With $8 cap and $30 floor, verify trade frequency and volume climb toward rank #2 ($586 needed).
+2. **Verify CSS variable fallbacks.** Reload dashboard and confirm modal headers/buttons render with correct colours (no broken theme() calls).
+3. **Test manual→DB bridge.** Fire a manual trade from dashboard, check `/agent/stats` last_trades for `mode=manual` entry.
 
 ### Critical pointers
 | Item | Value |
 |---|---|
-| **Rank** | #3 of 11 (was #2, slipped with momentum trades) |
-| **Mode** | GRIND (auto-corrected from PROFIT when rank > 2) |
-| **DB path** | `/app/data/agent.db` (docker volume, survives restarts) |
-| **Stats endpoint** | `GET /agent/stats` (totals, 24h per-pair PnL, last 20 trades) |
-| **Threshold fix** | `rank > 2` now (was `rank > 3` — kept rank #3 stuck) |
-
-### Critical pointers
-
-| Item | Value |
-|---|---|
-| **Container** | `user@<SERVER_HOST>:~/dreamdex-agent/` (Docker, mainnet live) |
-| **Public URL** | `https://<TUNNEL_HOST>` |
-| **Wallet** | `0xF4c825F3C2970153d78B407CF190861dd4E2b905` ($44.50 USDso + ~16.5 SOMI) |
-| **Loop speed** | NORMAL (300s) — reset on Docker restart; set FST (120s) in watch if needed |
-| **Mode** | PROFIT (auto-flips ≤2 rank → PROFIT, >3 rank → GRIND) |
-| **Rank** | #2 of 11 |
-| **API key location** | `FLASK_API_KEY` env var (server `.env`), `#define API_KEY` (firmware `wifi_secrets.h`) |
-| **Runbook** | `RUNBOOK.md` (includes full teardown sequence) |
+| **Rank** | #3 of 11 (target #2: +$256 volume) |
+| **Mode** | GRIND (sticky, auto=false) |
+| **Trade cap** | $8.00 (was $5.0) |
+| **Floor** | $30.00 USDso (was $35.0) |
+| **DB path** | `/app/data/agent.db` (docker volume) |
+| **Loop speed** | 120s (FST, locked in watch) |
