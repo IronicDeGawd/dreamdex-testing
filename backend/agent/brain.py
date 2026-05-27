@@ -121,7 +121,8 @@ def _system_prompt() -> str:
     return PROFIT_PROMPT if AGENT_MODE == "profit" else GRIND_PROMPT
 
 def decide(prices: dict, positions: dict, balances: dict,
-           history: list, leaderboard: dict) -> dict:
+           history: list, leaderboard: dict,
+           db_history: list | None = None, db_pnl: dict | None = None) -> dict:
     """
     Ask GPT-4o-mini what to do right now.
     Returns parsed decision dict or {"action": "hold"} on error.
@@ -162,7 +163,8 @@ def decide(prices: dict, positions: dict, balances: dict,
             "confidence": 100,  # testnet only
         }
 
-    user_msg = _build_prompt(prices, positions, balances, history, leaderboard)
+    user_msg = _build_prompt(prices, positions, balances, history, leaderboard,
+                             db_history or [], db_pnl or {})
 
     try:
         resp = requests.post(
@@ -198,7 +200,8 @@ def decide(prices: dict, positions: dict, balances: dict,
         return {"action": "hold", "reason": "api error", "confidence": 0}
 
 
-def _build_prompt(prices, positions, balances, history, lb) -> str:
+def _build_prompt(prices, positions, balances, history, lb,
+                  db_history=None, db_pnl=None) -> str:
     # Price momentum — compute % change vs 30 min ago
     momentum = {}
     for pair, pdata in prices.items():
@@ -219,11 +222,26 @@ def _build_prompt(prices, positions, balances, history, lb) -> str:
             f" | now ${mid:.4f} | PnL {pnl:+.2f}%"
         )
 
-    last_trades = history[-5:] if history else []
-    trade_lines = [
-        f"  {t.get('time', '-')}: {t.get('action')} {t.get('pair')} → {t.get('result', {}).get('status', 'ok')}"
-        for t in last_trades
-    ]
+    # Prefer DB-backed history (survives container restarts) but fall back to
+    # in-memory if the DB is empty (fresh boot or DB read failed).
+    if db_history:
+        # db_history is newest-first from sqlite; flip to chronological so the
+        # LLM reads it left-to-right as it happened.
+        chronological = list(reversed(db_history))[-20:]
+        trade_lines = [
+            f"  {(t.get('action') or '').upper()} {t.get('pair') or '-':14} "
+            f"${(t.get('amount_usdso') or 0):.2f} → {t.get('status', '-')}"
+            f" ({t.get('reason','')[:40]})"
+            for t in chronological
+        ]
+        last_trades_label = f"LAST {len(trade_lines)} TRADES (across restarts)"
+    else:
+        in_mem = history[-5:] if history else []
+        trade_lines = [
+            f"  {t.get('time', '-')}: {t.get('action')} {t.get('pair')} → {t.get('result', {}).get('status', 'ok')}"
+            for t in in_mem
+        ]
+        last_trades_label = "LAST 5 DECISIONS"
 
     # ROUND-TRIP HINT: find the most recent successful trade and tell the LLM
     # what side it MUST take next. This is the strongest single signal we can
@@ -271,9 +289,22 @@ LEADERBOARD:
   My fills:  {lb.get('my_tx', 0)}
   Signal:    {lb.get('signal', 'MAINTAIN')}
 
-LAST 5 DECISIONS:
+PER-PAIR NET PnL (last 24h, fills only):
+{_pnl_lines(db_pnl) if db_pnl else '  no data yet'}
+
+{last_trades_label}:
 {chr(10).join(trade_lines) if trade_lines else '  None yet'}
 
 Decide my next action. Obey the ROUND-TRIP STATE above first — that takes
 precedence over every other heuristic.
 """
+
+
+def _pnl_lines(pnl_by_pair: dict) -> str:
+    if not pnl_by_pair:
+        return "  none"
+    out = []
+    for pair, st in sorted(pnl_by_pair.items()):
+        sign = "+" if st.get("net_usdso", 0) >= 0 else "-"
+        out.append(f"  {pair:14} fills={st.get('fills',0):3}  net={sign}${abs(st.get('net_usdso',0)):.2f}")
+    return chr(10).join(out)

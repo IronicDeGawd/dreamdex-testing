@@ -9,6 +9,7 @@ from agent.strategy  import PriceAnalyzer
 from agent.state     import AgentState
 from trading.dreamdex import DreamDEX
 from monitor.leaderboard import LeaderboardMonitor
+from monitor import db as agent_db
 
 
 class TradingAgent:
@@ -88,8 +89,10 @@ class TradingAgent:
                 if rank <= 2 and current_mode == "grind":
                     print(f"[agent] 🎯 Rank ≤ 2 reached (#{rank}) — auto-flip grind → profit")
                     _brain.set_mode("profit")
-                elif rank > 3 and current_mode == "profit":
-                    print(f"[agent] 📉 Rank slipped to #{rank} — auto-flip profit → grind")
+                elif rank > 2 and current_mode == "profit":
+                    # Anything outside top-2 needs volume to reclaim it.
+                    # No hysteresis: rank 3 is already "we slipped, grind back".
+                    print(f"[agent] 📉 Rank slipped to #{rank} (outside top-2) — auto-flip profit → grind")
                     _brain.set_mode("grind")
         except Exception as e:
             print(f"[agent] mode-flip check failed: {e}")
@@ -139,9 +142,29 @@ class TradingAgent:
             print("[agent] No price data yet, skipping tick")
             return
 
-        # 3. Ask GPT
+        # Persist this tick's market state to sqlite so we can read it back
+        # after container restarts and feed historical context to the brain.
+        try:
+            momentum_now = {
+                p: ((pd.get("history", [])[-1]["mid"] - pd.get("history", [])[-6]["mid"]) /
+                    pd.get("history", [])[-6]["mid"] * 100)
+                if len(pd.get("history", [])) >= 6 else 0.0
+                for p, pd in prices.items()
+            }
+            agent_db.record_tick(prices, momentum_now)
+        except Exception as e:
+            print(f"[agent] tick persistence failed: {e}")
+
+        # 3. Ask GPT — pass DB-backed history + per-pair PnL so the prompt
+        # has cross-restart context.
+        try:
+            db_history = agent_db.last_trades(20)
+            db_pnl     = agent_db.pnl_by_pair(24)
+        except Exception:
+            db_history, db_pnl = [], {}
         decision = decide(prices, positions, balances,
-                          self.state.history(), lb_data)
+                          self.state.history(), lb_data,
+                          db_history=db_history, db_pnl=db_pnl)
         decision["time"] = _now()
         self.last_decision = decision
         print(f"[agent] 🧠 {decision['action'].upper()} "
@@ -346,6 +369,13 @@ class TradingAgent:
         os.makedirs("logs", exist_ok=True)
         with open(self.log_path, "a") as f:
             f.write(json.dumps(entry) + "\n")
+        # Mirror to sqlite. We pull the current brain mode for tagging so
+        # post-contest analysis can split grind- vs profit-mode results.
+        try:
+            from agent import brain as _brain
+            agent_db.record_trade(entry, mode=_brain.get_mode())
+        except Exception as e:
+            print(f"[agent] db.record_trade failed: {e}")
 
 
 def _now() -> str:

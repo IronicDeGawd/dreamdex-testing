@@ -13,6 +13,7 @@ services:
       - .env
     volumes:
       - ./logs:/app/logs
+      - ./data:/app/data   # sqlite agent memory; survives container rebuilds
     healthcheck:
       test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:5001/prices\", timeout=2)' || exit 1"]
       interval: 30s
