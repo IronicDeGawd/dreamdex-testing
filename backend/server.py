@@ -126,17 +126,28 @@ def agent_stats():
 
 @app.route("/agent/mode", methods=["GET", "POST"])
 def agent_mode():
-    """Switch brain strategy: 'grind' (volume) or 'profit' (momentum). AUTHED on POST."""
+    """Switch brain strategy. AUTHED on POST.
+    Accepts 'grind' / 'profit' (sticky manual override) or 'auto' (rank-based flip).
+    GET returns the effective mode + whether auto-flip is active."""
     from agent import brain
     if request.method == "GET":
-        return jsonify({"mode": brain.get_mode()})
+        return jsonify({
+            "mode":     brain.get_mode(),  # effective: grind or profit
+            "auto":     brain.is_auto(),
+            "selected": "auto" if brain.is_auto() else brain.get_mode(),
+        })
     require_api_key()
     mode = request.json.get("mode", "grind")
     try:
         brain.set_mode(mode)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    return jsonify({"ok": True, "mode": brain.get_mode()})
+    return jsonify({
+        "ok":       True,
+        "mode":     brain.get_mode(),
+        "auto":     brain.is_auto(),
+        "selected": "auto" if brain.is_auto() else brain.get_mode(),
+    })
 
 @app.route("/vault/deposit", methods=["POST"])
 def vault_deposit():
