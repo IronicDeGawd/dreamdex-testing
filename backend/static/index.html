@@ -757,17 +757,49 @@ cd ~ && rm -rf ~/dreamdex-agent</pre>
                 state.errors.agent = 0;
                 state.lastTick.agent = new Date();
 
-                // Diff-based activity log: surface every new decision + fill jump.
+                // Diff-based activity log. For trade decisions we wait for the
+                // result_status to come back before logging, so each entry
+                // shows the *outcome* (success vs sim-rejected vs silent-reject)
+                // and the user no longer sees three duplicate-looking BUYs
+                // that were actually three sim-rejected attempts.
                 const decLog = data.last_decision;
-                if (decLog && decLog.time && decLog.time !== state.lastDecisionTime) {
-                    state.lastDecisionTime = decLog.time;
+                if (decLog && decLog.time) {
                     const act = (decLog.action || 'hold').toUpperCase();
-                    const pair = decLog.pair || '---';
-                    const amt = decLog.amount_usdso != null ? `$${(+decLog.amount_usdso).toFixed(2)}` : '';
-                    const conf = decLog.confidence != null ? `${decLog.confidence}%` : '';
-                    const reason = decLog.reason || '';
-                    let icon = act === 'BUY' ? '🟢' : (act === 'SELL' ? '🔴' : '⏸');
-                    addLog(`${icon} brain: ${act} ${pair} ${amt} (${conf}) — ${reason}`);
+                    const status = decLog.result_status || null;
+                    // Unique key: time + status. We log once when status is
+                    // unknown (HOLD) and again if status flips later.
+                    const key = decLog.time + ':' + (status || 'pending');
+                    if (key !== state.lastDecisionTime) {
+                        // For trade actions, suppress the "pending" log entry
+                        // and wait for the next poll where status is populated.
+                        const isTrade = act === 'BUY' || act === 'SELL';
+                        if (!isTrade || status) {
+                            state.lastDecisionTime = key;
+                            const pair = decLog.pair || '---';
+                            const amt = decLog.amount_usdso != null ? `$${(+decLog.amount_usdso).toFixed(2)}` : '';
+                            const conf = decLog.confidence != null ? `${decLog.confidence}%` : '';
+                            const reason = decLog.reason || '';
+                            // Icon by outcome, not just side:
+                            //   🟢 BUY landed on chain
+                            //   🔴 SELL landed on chain
+                            //   🟡 sim-rejected (would_revert) — never broadcast, no $$ moved
+                            //   🟠 tx broadcast but rejected / silent / unverified
+                            //   ⏸ HOLD
+                            let icon, label;
+                            if (act === 'HOLD') { icon = '⏸'; label = 'HOLD'; }
+                            else if (status === 'success') {
+                                icon  = (act === 'BUY') ? '🟢' : '🔴';
+                                label = act + ' filled';
+                            } else if (status === 'would_revert') {
+                                icon = '🟡'; label = act + ' sim-rejected';
+                            } else if (['silent_reject','placed_unfilled','reverted','unverified','error'].includes(status)) {
+                                icon = '🟠'; label = act + ' ' + status;
+                            } else {
+                                icon = '⚪'; label = act + ' ' + (status || '?');
+                            }
+                            addLog(`${icon} ${label} ${pair} ${amt} (${conf}) — ${reason}`);
+                        }
+                    }
                 }
                 const tx = data.state && typeof data.state.tx_count === 'number' ? data.state.tx_count : null;
                 if (tx !== null) {

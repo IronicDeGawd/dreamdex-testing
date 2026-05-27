@@ -65,6 +65,11 @@ Hard rules you must never break:
   on tiny volume — the leaderboard counts volume per fill, so a $5
   fill is worth 60% less than an $8 fill. Default to $8.
 - If USDso balance < $30: action must be "hold"
+- AVOID-LIST: if the PAIRS TO AVOID block below names a pair, do NOT
+  pick that pair this tick. Recent attempts on it have been failing
+  (would_revert / silent_reject / placed_unfilled), so picking it
+  again will waste the next tick too. Switch to a different pair
+  from the allowed list.
 - ROUND-TRIP RULE: if your immediately previous successful action was a BUY of
   pair X, the very next non-hold action MUST be a SELL of pair X. Only after
   the round-trip is complete may you start a new BUY. This is non-negotiable —
@@ -293,6 +298,25 @@ def _build_prompt(prices, positions, balances, history, lb,
         allowed_for_buy = [p for p in allowed_for_buy if p != just_closed_pair]
         round_trip_hint += f" Diversity: avoid {just_closed_pair} on the next BUY; pick from {' / '.join(allowed_for_buy)}."
 
+    # AVOID-LIST: scan the last few DB rows for any pair whose last 2+ attempts
+    # all failed (would_revert / silent_reject / placed_unfilled / reverted /
+    # unverified). The LLM keeps re-picking failing pairs otherwise.
+    avoid_list: list[str] = []
+    if db_history:
+        FAIL_STATUSES = {"would_revert", "silent_reject", "placed_unfilled", "reverted", "unverified"}
+        by_pair: dict[str, list[str]] = {}
+        for t in db_history[:10]:  # newest 10
+            p = t.get("pair")
+            s = t.get("status") or ""
+            if not p:
+                continue
+            by_pair.setdefault(p, []).append(s)
+        for pair, statuses in by_pair.items():
+            recent = statuses[:3]
+            if len(recent) >= 2 and all(s in FAIL_STATUSES for s in recent):
+                avoid_list.append(f"{pair} (last {len(recent)}: {','.join(recent)})")
+    avoid_block = ("  " + " ; ".join(avoid_list)) if avoid_list else "  (none — all pairs OK to trade)"
+
     return f"""
 CURRENT PRICES (only tradeable pairs shown):
   SOMI:   ${prices.get('SOMI:USDso',  {}).get('mid', 0):.5f}  ({momentum.get('SOMI:USDso',  0):+.2f}% / 30min)
@@ -309,6 +333,9 @@ OPEN POSITIONS ({len(positions)}/3 max):
 
 ROUND-TRIP STATE:
 {round_trip_hint}
+
+PAIRS TO AVOID THIS TICK (recent failures):
+{avoid_block}
 
 LEADERBOARD:
   My rank:   #{lb.get('my_rank', '?')} of {lb.get('total', 10)}
