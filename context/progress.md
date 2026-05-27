@@ -6,6 +6,9 @@ Stack: Python 3.11 + Flask + web3.py agent backend (Docker `network_mode: host`)
 
 ## Completed
 
+### 2026-05-27 14:24 — Hard-clamp min trade to $7, dashboard contrast invert (commit `f9ae085`)
+`AGENT_MIN_TRADE` bumped 0.10 → 7.00 in `backend/config.py`. The agent's `max(MIN, min(MAX, amt))` clamp now guarantees every trade lands in [$7, $8], regardless of LLM output. Brain prompt updated to state $7 as hard floor (was picking $5 despite "$7–$8 sweet spot" guidance). Static palette inverted: outer body now white-ish `--c-bg #f4f4f4` with `--c-page-text #111`; panel interiors stay dark (`--c-surface #0d0d0d`, `--c-text #f5f5f5`). First decision post-restart: `BUY SOMI $8.00` (full cap). Verified: `docker exec` reports `min=$7.0 max=$8.0`.
+
 ### 2026-05-27 14:22 — Theme() CSS variable swap, modal style rebuild (commit `d1eb25a`)
 Tailwind CDN's plain `<style>` blocks were not reliably resolving `theme()` calls, leaving modal headers and confirmation buttons with broken styles. Replaced every `theme()` with `:root` CSS variables (`--c-bg`, `--c-surface`, `--c-border`, `--c-text`, `--c-muted`, `--c-danger`, `--c-success`, `--c-warning`). New `.modal-card`, `.modal-overlay`, `.btn-primary`, `.btn-warning`, `.btn-danger` classes use CSS variables with inline fallbacks. Bumped panel surface #111 → #1a1a1a and text → #f5f5f5 for visible separation from page background.
 
@@ -89,25 +92,27 @@ Rewrote full commit history via `git-filter-repo --replace-text` to redact sensi
 - **Two-sided vault-delta is the real fill signal.** Single-side movement (quote only, or base only) can happen from gas refunds or unrelated vault ops. Require BOTH quote AND base (or quote AND native) to move in expected directions to confirm a fill. Single-side → `placed_unfilled` status prevents phantom round-trip sells.
 - **Shared LeaderboardMonitor, not per-agent.** If TradingAgent creates its own monitor without calling `.start()`, rank checks always see "?". Always pass the main loop's running monitor to agent init, or create + start the monitor as a pre-condition before any agent spawns.
 - **CSS `theme()` doesn't resolve in plain `<style>` blocks via CDN.** Tailwind `theme()` calls inside Tailwind CDN-loaded pages sometimes fail. Hard-code hex colours with `!important` when `:active`-style overrides need guaranteed specificity wins.
+- **LLM prompts are suggestions, not rules.** A prompt like "$7–$8 sweet spot" guided behavior in earlier test, but the LLM still picked $5 when reasoning diverged. Hard rules (trade size, capital floors, mode locks) must be enforced at the code level with mathematical clamps, not natural-language guidance. Prompts guide behavior within code boundaries; code sets the boundary.
 - **OrderPlaced events emit `filled=0` even on real fills.** Don't trust `filled` field from on-chain logs. Use vault-balance delta (pre vs post `getWithdrawableBalance`) as the authoritative signal.
 - **Decimal field renames require grep cleanup.** When refactoring (e.g., `dec` → `decLog`), easy to miss a reference and silently pass wrong args to `Decimal()`. Always grep the old name to verify full migration.
 - **WBTC is 8 decimals on dreamDEX, not 18.** USDC.e is 6. The agent's MARKETS dict encodes this; if you hardcode elsewhere, order quantities will be orders of magnitude off.
 
 ## Resume From Here
 
-**Three fixes deployed: CSS variable swap (theme() reliability), manual trade DB mirroring, and trade sizing bump ($8 cap, $30 floor).** Agent running GRIND (sticky, auto=false), loop 120s, rank #3 of 11 (~$330 volume). Wallet $44.50 USDso + ~47 SOMI; mid-cycle exposure ~$36.50 with ~$6.50 buffer. Manual SELL pathway verified via `/agent/stats`. Target: rank #2 (~$256 more volume).
+**Four fixes deployed: CSS variable swap, manual trade DB mirroring, $8 cap bump, and hard min-trade clamp to $7.** New $7–$8 sizing band is now code-enforced with `AGENT_MIN_TRADE=7.0` clamp, not just prompt guidance. Agent running GRIND (sticky, auto=false), loop 120s, rank #3 of 11 (~$330 volume). Wallet $44.50 USDso + ~47 SOMI; mid-cycle exposure ~$36.50 with ~$6.50 buffer. Target: rank #2 (~$256 more volume).
 
 ### Next steps
-1. **Monitor volume climb.** With $8 cap and $30 floor, verify trade frequency and volume climb toward rank #2 ($586 needed).
-2. **Verify CSS variable fallbacks.** Reload dashboard and confirm modal headers/buttons render with correct colours (no broken theme() calls).
-3. **Test manual→DB bridge.** Fire a manual trade from dashboard, check `/agent/stats` last_trades for `mode=manual` entry.
+1. **Monitor volume + LLM decisioning.** With hard $7 floor + $8 cap, verify LLM stays within bounds and volume accelerates toward rank #2.
+2. **Watch for buy frequency.** Hard $7 floor removes the $5 wiggle room; if LLM avoids small moves, cycle time may increase. Adjust brain prompt's momentum threshold if needed.
+3. **CSS/modal verification.** Reload dashboard; confirm theme colors render correctly (no broken theme() calls in practice).
 
 ### Critical pointers
 | Item | Value |
 |---|---|
 | **Rank** | #3 of 11 (target #2: +$256 volume) |
 | **Mode** | GRIND (sticky, auto=false) |
-| **Trade cap** | $8.00 (was $5.0) |
-| **Floor** | $30.00 USDso (was $35.0) |
+| **Trade min** | $7.00 (code-enforced clamp) |
+| **Trade max** | $8.00 |
+| **Floor** | $30.00 USDso |
 | **DB path** | `/app/data/agent.db` (docker volume) |
 | **Loop speed** | 120s (FST, locked in watch) |
