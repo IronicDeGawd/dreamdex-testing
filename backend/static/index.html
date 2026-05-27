@@ -28,34 +28,59 @@
         }
     </script>
     <style>
+        /* Literal hex throughout — theme() expressions inside a plain
+           <style> block don't reliably resolve via the Tailwind CDN, which
+           caused modal headers and button text to disappear. */
+        :root {
+            --c-bg:        #050505;   /* near-black outer surface */
+            --c-surface:   #1a1a1a;   /* panels pop visibly off bg */
+            --c-border:    #3a3a3a;   /* visible separators */
+            --c-text:      #f5f5f5;   /* brighter for stronger contrast */
+            --c-muted:     #9a9a9a;
+            --c-danger:    #e75353;
+            --c-success:   #5cb872;
+            --c-warning:   #d9aa3c;
+        }
+
         body {
-            background-color: theme('colors.bg');
-            color: theme('colors.textMain');
-            font-family: theme('fontFamily.sans');
+            background-color: var(--c-bg);
+            color: var(--c-text);
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             -webkit-font-smoothing: antialiased;
         }
-        
-        /* Utility classes for terminal aesthetic */
-        .panel { border: 1px solid theme('colors.border'); background-color: theme('colors.surface'); }
-        .panel-header { border-bottom: 1px solid theme('colors.border'); padding: 0.5rem 0.75rem; font-weight: 600; font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.05em; color: theme('colors.textMuted'); }
+
+        .panel { border: 1px solid var(--c-border); background-color: var(--c-surface); }
+        .panel-header { border-bottom: 1px solid var(--c-border); padding: 0.5rem 0.75rem; font-weight: 600; font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-muted); }
         .panel-body { padding: 1rem; }
-        
-        .input-base { background: transparent; border: 1px solid theme('colors.border'); color: theme('colors.textMain'); padding: 0.25rem 0.5rem; outline: none; font-family: theme('fontFamily.mono'); font-size: 0.875rem; }
-        .input-base:focus { border-color: theme('colors.textMuted'); }
-        
-        .btn-base { border: 1px solid theme('colors.border'); background: transparent; color: theme('colors.textMain'); padding: 0.25rem 0.75rem; cursor: pointer; transition: background 0.1s; font-size: 0.875rem; }
-        .btn-base:hover:not(:disabled) { background: theme('colors.border'); }
+
+        .input-base { background: transparent; border: 1px solid var(--c-border); color: var(--c-text); padding: 0.25rem 0.5rem; outline: none; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 0.875rem; }
+        .input-base:focus { border-color: var(--c-muted); }
+
+        .btn-base { border: 1px solid var(--c-border); background: transparent; color: var(--c-text); padding: 0.25rem 0.75rem; cursor: pointer; transition: background 0.1s; font-size: 0.875rem; }
+        .btn-base:hover:not(:disabled) { background: var(--c-border); }
         .btn-base:disabled { opacity: 0.5; cursor: not-allowed; }
-        .btn-active { background: #e5e5e5 !important; color: #0a0a0a !important; border-color: #e5e5e5 !important; font-weight: 700; }
-        
-        .table-row { border-bottom: 1px solid theme('colors.border'); }
+        .btn-active { background: var(--c-text) !important; color: var(--c-bg) !important; border-color: var(--c-text) !important; font-weight: 700; }
+
+        /* Modal primary buttons — guarantee readable contrast regardless of
+           whether the CDN-emitted Tailwind utilities load. */
+        .btn-primary { background: var(--c-text) !important; color: var(--c-bg) !important; border-color: var(--c-text) !important; font-weight: 700; }
+        .btn-warning { background: var(--c-warning) !important; color: var(--c-bg) !important; border-color: var(--c-warning) !important; font-weight: 700; }
+        .btn-danger  { background: var(--c-danger)  !important; color: #ffffff   !important; border-color: var(--c-danger)  !important; font-weight: 700; }
+
+        .table-row { border-bottom: 1px solid var(--c-border); }
         .table-row:last-child { border-bottom: none; }
-        
+
+        /* Modal scaffolding */
+        .modal-overlay { background-color: rgba(10, 10, 10, 0.85); backdrop-filter: blur(4px); }
+        .modal-card    { background: var(--c-surface); border: 1px solid var(--c-border); }
+        .modal-card.warning { border-color: var(--c-warning); }
+        .modal-card.danger  { border-color: var(--c-danger); }
+
         /* Custom scrollbar for logs */
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: theme('colors.border'); }
-        ::-webkit-scrollbar-thumb:hover { background: theme('colors.textMuted'); }
+        ::-webkit-scrollbar-thumb { background: var(--c-border); }
+        ::-webkit-scrollbar-thumb:hover { background: var(--c-muted); }
 
         .hidden { display: none !important; }
     </style>
@@ -337,47 +362,48 @@
 
     <!-- Modals -->
     <!-- Overlay -->
-    <div id="modal-overlay" class="fixed inset-0 bg-bg/80 backdrop-blur-sm z-40 hidden flex items-center justify-center p-4">
-        
+    <div id="modal-overlay" class="modal-overlay fixed inset-0 z-40 hidden flex items-center justify-center p-4">
+
         <!-- API Key Modal -->
-        <div id="modal-apikey" class="panel w-full max-w-md hidden shadow-2xl">
+        <div id="modal-apikey" class="modal-card w-full max-w-md hidden shadow-2xl">
             <div class="panel-header">Authentication Required</div>
             <div class="panel-body">
-                <p class="text-sm mb-4 text-textMuted">Enter the Flask API Key from the backend <code class="bg-surface px-1 text-textMain border border-border">.env</code> file to execute mutations.</p>
+                <p class="text-sm mb-4" style="color: var(--c-muted)">Enter the Flask API Key from the backend <code class="px-1 border" style="background: var(--c-bg); color: var(--c-text); border-color: var(--c-border)">.env</code> file to execute mutations.</p>
                 <input type="password" id="input-apikey" class="input-base w-full mb-4" placeholder="X-API-Key...">
                 <div class="flex justify-end gap-2">
                     <button id="btn-close-apikey" class="btn-base">Cancel</button>
-                    <button id="btn-save-apikey" class="btn-base bg-textMain text-bg border-textMain font-bold">Save Key</button>
+                    <button id="btn-save-apikey" class="btn-base btn-primary">Save Key</button>
                 </div>
             </div>
         </div>
 
         <!-- Confirm Modal -->
-        <div id="modal-confirm" class="panel w-full max-w-md hidden shadow-2xl border-warning">
-            <div class="panel-header text-warning border-warning">Confirm Action</div>
+        <div id="modal-confirm" class="modal-card warning w-full max-w-md hidden shadow-2xl">
+            <div class="panel-header" style="color: var(--c-warning); border-bottom-color: var(--c-warning)">Confirm Action</div>
             <div class="panel-body">
-                <p id="confirm-msg" class="text-sm mb-4 font-mono py-2 px-3 bg-surface border border-border"></p>
-                <p class="text-xs text-warning mb-4 uppercase">This action executes on-chain and uses real assets.</p>
+                <p id="confirm-msg" class="text-sm mb-4 font-mono py-2 px-3 border" style="background: var(--c-bg); border-color: var(--c-border); color: var(--c-text)"></p>
+                <p class="text-xs mb-4 uppercase" style="color: var(--c-warning)">This action executes on-chain and uses real assets.</p>
                 <div class="flex justify-end gap-2">
                     <button id="btn-confirm-cancel" class="btn-base">Cancel</button>
-                    <button id="btn-confirm-ok" class="btn-base bg-warning text-bg border-warning font-bold">Confirm Send</button>
+                    <button id="btn-confirm-ok" class="btn-base btn-warning">Confirm Send</button>
                 </div>
             </div>
         </div>
 
         <!-- Wipe Modal -->
-        <div id="modal-wipe" class="panel w-full max-w-xl hidden shadow-2xl border-danger">
-            <div class="panel-header text-danger border-danger">Emergency Stop & Wipe Runbook</div>
+        <div id="modal-wipe" class="modal-card danger w-full max-w-xl hidden shadow-2xl">
+            <div class="panel-header" style="color: var(--c-danger); border-bottom-color: var(--c-danger)">Emergency Stop &amp; Wipe Runbook</div>
             <div class="panel-body">
-                <p class="text-sm mb-2 text-textMuted">Run these commands manually on the deployment server to force halt and wipe state.</p>
-                <pre class="bg-surface border border-border p-3 text-xs font-mono text-textMain overflow-x-auto whitespace-pre-wrap mb-4">
-ssh admin@<TUNNEL_HOST>
-cd /var/www/dreamdex-agent
-docker compose stop
-rm -rf ./data/sqlite.db
-docker compose up -d</pre>
+                <p class="text-sm mb-2" style="color: var(--c-muted)">Run these commands manually on the deployment server to force halt and wipe state.</p>
+                <pre class="p-3 text-xs font-mono overflow-x-auto whitespace-pre-wrap mb-4 border" style="background: var(--c-bg); border-color: var(--c-border); color: var(--c-text)">
+ssh user@&lt;SERVER_HOST&gt;
+cd ~/dreamdex-agent
+docker compose down
+docker rmi dreamdex-agent:latest
+shred -u .env
+cd ~ && rm -rf ~/dreamdex-agent</pre>
                 <div class="flex justify-end">
-                    <button id="btn-close-wipe" class="btn-base">Close</button>
+                    <button id="btn-close-wipe" class="btn-base btn-danger">Close</button>
                 </div>
             </div>
         </div>
