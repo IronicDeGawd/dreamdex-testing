@@ -6,6 +6,9 @@ Stack: Python 3.11 + Flask + web3.py agent backend (Docker `network_mode: host`)
 
 ## Completed
 
+### 2026-05-27 15:31 — Plan-B dual agent: orchestrator brain + brainless micro on same wallet (commit `96b1bc2`)
+One LLM decision per tick now directs TWO agents on the same EOA via new `decide_pair` brain function + `ORCHESTRATOR_PROMPT`. Main agent (orchestrator, $7–$15 / 120s loop) executes its decision; micro agent (brainless, $2–$5 / 90s, profit-locked) gets its decision queued via shared DreamDEX and SomniaWallet, then fires sequentially — both txs serialize on the nonce lock without races. Per-agent config added: `dex`, `name`, `min_trade`, `max_trade`, `loop_secs`, `fixed_mode`, `peer_agent`, `brainless`. Sequential dispatch chosen over parallel to avoid nonce-ordering races and unnecessary affordability checks. `config.py` bumped `AGENT_MAX_TRADE` to $15 and `AGENT_STOP_BELOW` to $20; added `MICRO_AGENT_MIN_TRADE=2`, `MICRO_AGENT_MAX_TRADE=5`, `MICRO_AGENT_LOOP_SECS=90`. `server.py` exposes `/agent` (main) and `/agent/micro` (sub); `init()` takes optional `micro=` kwarg. `monitor.db` gained `agent_name` column with in-place migration fix: original `executescript` tried CREATE INDEX on the new column in same call, which crashes on live DBs — split into three steps (CREATE TABLE → migrate → CREATE INDEX). Container restarted cleanly; main + micro both `running=true`. First post-restart main decision: `BUY WETH:USDso $15.00` at 05:08:02.
+
 ### 2026-05-27 15:30 — Outcome-aware activity log + avoid-list for failing pairs (commit `f0da9b5`)
 Trade result status now attached to each `last_decision` in the `/agent` endpoint. Activity log icons now reflect outcome, not intent: 🟢 BUY landed, 🔴 SELL landed, 🟡 sim-rejected (would_revert), 🟠 silent_reject / placed_unfilled / reverted, ⏸ HOLD, ⚪ unknown. Log waits one poll for `result_status` to populate so each entry shows final outcome. Brain's `_build_prompt` scans last 10 DB rows per pair and emits explicit `PAIRS TO AVOID THIS TICK` block when a pair's last 2+ attempts returned failure statuses (would_revert / silent_reject / placed_unfilled / reverted / unverified). GRIND prompt's hard rules reference this block so LLM rotates off failing pairs. First post-restart decision returned would_revert for SOMI — avoid-list will rotate to different pair next tick.
 
@@ -89,6 +92,7 @@ Rewrote full commit history via `git-filter-repo --replace-text` to redact sensi
 
 ## Lessons
 
+- **SQLite `executescript` aborts on first failure and never runs the rest.** When adding a column with `ALTER TABLE` then creating an INDEX on that column in the same `executescript()` call, the index creation fails atomically and the whole block rolls back — even on already-migrated databases. Solution: split into separate `executescript()` calls or use individual `execute()` for each statement. ALTER + data migration + INDEX should be three separate calls so each can fail independently without blocking the others.
 - **CSS `theme()` calls don't resolve in plain `<style>` blocks loaded via Tailwind CDN.** When the Tailwind build doesn't happen at server startup, browsers can't find theme references. Use `:root` CSS variables with hard-coded hex values instead. This guarantees specificity wins even with `!important` overrides for `:active`-style states.
 - **Every code path that writes to the chain must also write to the analysis database.** If `ManualTrader.execute` skips `db.record_trade()` while `TradingAgent._log` always calls it, manual trades vanish from stats. Grep for all trade-execution paths (manual, automated, signal-based) and ensure every one records to the same DB table. This is load-bearing for accuracy metrics and LLM context.
 - **Hysteresis flips need an explicit opt-in flag when manual overrides exist.** Rank-based auto-flips work for fully automatic systems, but when you add sticky manual mode-locks (e.g., lock to GRIND, disable auto-flip), the auto flip becomes a distraction — users expect their manual pick to stick until explicitly overridden. Solution: add an `auto` flag (default true); set_mode("grind"/"profit") sets `auto=false`, re-enabling requires explicit set_mode("auto"). This prevents rank wobble from fighting user intent.
@@ -107,20 +111,20 @@ Rewrote full commit history via `git-filter-repo --replace-text` to redact sensi
 
 ## Resume From Here
 
-**Four fixes deployed: CSS variable swap, manual trade DB mirroring, $8 cap bump, and hard min-trade clamp to $7.** New $7–$8 sizing band is now code-enforced with `AGENT_MIN_TRADE=7.0` clamp, not just prompt guidance. Agent running GRIND (sticky, auto=false), loop 120s, rank #3 of 11 (~$330 volume). Wallet $44.50 USDso + ~47 SOMI; mid-cycle exposure ~$36.50 with ~$6.50 buffer. Target: rank #2 (~$256 more volume).
+**Dual-agent orchestrator deployed.** Main agent (orchestrator, $7–$15 / 120s) receives LLM-driven `decide_pair` output directing both its own trade and a queued decision for the micro agent (brainless, $2–$5 / 90s, profit-locked). Sequential dispatch prevents nonce races. Container live; main + micro both running. First post-restart orchestrator decision: `BUY WETH:USDso $15.00`. Wallet still ~$44.50 USDso; both agents sharing the same EOA so volume accumulates. Target: double the trading pairs' micro-driven fills without disrupting main agent's higher-volume moves.
 
 ### Next steps
-1. **Monitor volume + LLM decisioning.** With hard $7 floor + $8 cap, verify LLM stays within bounds and volume accelerates toward rank #2.
-2. **Watch for buy frequency.** Hard $7 floor removes the $5 wiggle room; if LLM avoids small moves, cycle time may increase. Adjust brain prompt's momentum threshold if needed.
-3. **CSS/modal verification.** Reload dashboard; confirm theme colors render correctly (no broken theme() calls in practice).
+1. **Monitor dual-agent fills + nonce ordering.** Watch container logs for both agents' `/decision` and `/micro_decision` endpoints. Verify main's tx completes before micro's queued tx fires (sequential on same nonce lock). Both should report `running=true` with distinct agent names (main vs micro).
+2. **Verify micro fills happen.** Micro is brainless, so all its decisions come from orchestrator. Check `/agent/micro/stats` endpoint to confirm micro is recording trades (should see profit-locked trades at $2–$5 sizing).
+3. **Monitor double-sided volume.** Main agent's larger $7–$15 moves + micro's $2–$5 moves should increase total volume per tick without wallet conflicts (same EOA, sequential txs, nonce mgmt handles ordering).
 
 ### Critical pointers
 | Item | Value |
 |---|---|
-| **Rank** | #3 of 11 (target #2: +$256 volume) |
-| **Mode** | GRIND (sticky, auto=false) |
-| **Trade min** | $7.00 (code-enforced clamp) |
-| **Trade max** | $8.00 |
-| **Floor** | $30.00 USDso |
-| **DB path** | `/app/data/agent.db` (docker volume) |
-| **Loop speed** | 120s (FST, locked in watch) |
+| **Main agent mode** | PROFIT/$7–$15 per 120s (orchestrator) |
+| **Micro agent mode** | PROFIT-LOCKED at $2–$5 per 90s (brainless) |
+| **Brain function** | `decide_pair()` + `ORCHESTRATOR_PROMPT` (one LLM call per tick) |
+| **Dispatch** | Sequential: main executes, micro queued, both on same nonce lock |
+| **Wallet** | ~$44.50 USDso, shared EOA for both agents |
+| **DB migration** | Fixed: ALTER + INDEX now three separate calls, not one `executescript` |
+| **Micro endpoint** | `GET /agent/micro/stats` (brainless stats) |
