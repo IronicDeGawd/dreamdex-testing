@@ -118,6 +118,12 @@ def set_max_orders():
     _agent.set_max_orders(n)
     return jsonify({"ok": True, "max_orders": _agent.max_orders})
 
+@app.route("/agent/stats", methods=["GET"])
+def agent_stats():
+    """Aggregate trade memory from sqlite — totals, per-pair PnL, last 20 trades."""
+    from monitor import db as agent_db
+    return jsonify(agent_db.stats_summary())
+
 @app.route("/agent/mode", methods=["GET", "POST"])
 def agent_mode():
     """Switch brain strategy: 'grind' (volume) or 'profit' (momentum). AUTHED on POST."""

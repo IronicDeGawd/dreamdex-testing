@@ -4,6 +4,7 @@ from agent.agent         import TradingAgent
 from monitor.prices      import PriceFeed
 from monitor.leaderboard import LeaderboardMonitor
 from monitor.portfolio   import Portfolio
+from monitor             import db as agent_db
 from trading.manual      import ManualTrader
 import server
 
@@ -39,6 +40,11 @@ def main():
     print(f"  DEX API: {DREAMDEX_HTTP}")
     print(f"  Flask:   http://0.0.0.0:{FLASK_PORT}")
     print("="*55)
+
+    # Init persistent memory (sqlite). Safe to call repeatedly; creates the
+    # /app/data/agent.db file + tables if absent.
+    agent_db.init()
+    print("[main] sqlite memory initialised")
 
     # Init components
     prices    = PriceFeed()
