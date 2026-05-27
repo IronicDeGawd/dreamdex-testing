@@ -77,23 +77,23 @@ class TradingAgent:
             time.sleep(self.loop_secs)
 
     def _tick(self):
-        # R5: auto-flip mode based on rank — runs FIRST, before any early-return
-        # gates (capital floor, max orders), so the flip happens even when the
-        # agent is holding.
+        # R5/R7: rank-based auto-flip — only runs when the user has opted in
+        # via mode="auto" (AGENT_AUTO). Manual selection of grind or profit
+        # is sticky: rank changes won't override it until the user explicitly
+        # re-enables auto.
         try:
             from agent import brain as _brain
-            lb_stats = self.lb.get_my_stats() if self.lb else {}
-            current_mode = _brain.get_mode()
-            rank = lb_stats.get("my_rank")
-            if isinstance(rank, int):
-                if rank <= 2 and current_mode == "grind":
-                    print(f"[agent] 🎯 Rank ≤ 2 reached (#{rank}) — auto-flip grind → profit")
-                    _brain.set_mode("profit")
-                elif rank > 2 and current_mode == "profit":
-                    # Anything outside top-2 needs volume to reclaim it.
-                    # No hysteresis: rank 3 is already "we slipped, grind back".
-                    print(f"[agent] 📉 Rank slipped to #{rank} (outside top-2) — auto-flip profit → grind")
-                    _brain.set_mode("grind")
+            if _brain.is_auto():
+                lb_stats = self.lb.get_my_stats() if self.lb else {}
+                current_mode = _brain.get_mode()
+                rank = lb_stats.get("my_rank")
+                if isinstance(rank, int):
+                    if rank <= 2 and current_mode == "grind":
+                        print(f"[agent] 🎯 [auto] Rank ≤ 2 reached (#{rank}) — flip grind → profit")
+                        _brain.set_mode_internal("profit")
+                    elif rank > 2 and current_mode == "profit":
+                        print(f"[agent] 📉 [auto] Rank #{rank} outside top-2 — flip profit → grind")
+                        _brain.set_mode_internal("grind")
         except Exception as e:
             print(f"[agent] mode-flip check failed: {e}")
 

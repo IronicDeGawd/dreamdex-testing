@@ -146,10 +146,11 @@
                         </div>
 
                         <div class="flex flex-col gap-1">
-                            <span class="text-xs text-textMuted uppercase" title="GRIND maximises volume (always trades). PROFIT only trades on momentum. Auto-flips to PROFIT once rank ≤ 2.">Mode</span>
+                            <span class="text-xs text-textMuted uppercase" title="GRIND and PROFIT are manual (sticky). AUTO follows leaderboard rank: profit at rank ≤ 2, grind otherwise.">Mode</span>
                             <div class="flex border border-border" id="mode-group">
-                                <button class="btn-base border-none px-2 py-1 text-xs" data-mode="grind" title="Mechanical round-trips, every cycle. Volume up, PnL slowly down.">GRIND</button>
-                                <button class="btn-base border-none border-l border-border px-2 py-1 text-xs" data-mode="profit" title="Hold unless momentum favours a trade. Lower volume, target PnL.">PROFIT</button>
+                                <button class="btn-base border-none px-2 py-1 text-xs" data-mode="grind" title="Manual: mechanical round-trips every cycle. Volume up.">GRIND</button>
+                                <button class="btn-base border-none border-l border-border px-2 py-1 text-xs" data-mode="profit" title="Manual: hold unless momentum favours a trade.">PROFIT</button>
+                                <button class="btn-base border-none border-l border-border px-2 py-1 text-xs" data-mode="auto" title="Auto: flip between GRIND and PROFIT based on rank.">AUTO</button>
                             </div>
                         </div>
 
@@ -688,15 +689,26 @@ docker compose up -d</pre>
         const pollMode = async () => {
             try {
                 const data = await apiCall('/agent/mode');
+                // server returns { mode (effective), auto, selected }
+                // "selected" is what the user picked: grind, profit, or auto.
                 state.mode = data.mode || 'grind';
+                state.selected = data.selected || data.mode || 'grind';
                 if (el.modeGroup) {
                     Array.from(el.modeGroup.children).forEach(b => {
-                        if (b.dataset.mode === state.mode) b.classList.add('btn-active');
-                        else b.classList.remove('btn-active');
+                        // Highlight the button the user actually selected.
+                        // For AUTO, also subtly hint at the underlying effective mode.
+                        const isSelected = b.dataset.mode === state.selected;
+                        b.classList.toggle('btn-active', isSelected);
+                        // Annotate AUTO with the live effective mode
+                        if (b.dataset.mode === 'auto' && state.selected === 'auto') {
+                            b.textContent = `AUTO (${state.mode.toUpperCase().slice(0,3)})`;
+                        } else if (b.dataset.mode === 'auto') {
+                            b.textContent = 'AUTO';
+                        }
                     });
                 }
                 if (state.lastMode !== null && state.lastMode !== state.mode) {
-                    addLog(`🎯 Mode auto-flip: ${state.lastMode} → ${state.mode}`);
+                    addLog(`🎯 Mode flip: ${state.lastMode} → ${state.mode}${state.selected === 'auto' ? ' (auto)' : ''}`);
                 }
                 state.lastMode = state.mode;
             } catch (err) {
