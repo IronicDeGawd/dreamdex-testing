@@ -6,6 +6,9 @@ Stack: Python 3.11 + Flask + web3.py agent backend (Docker `network_mode: host`)
 
 ## Completed
 
+### 2026-05-27 17:00 — Internal PnL + auto-liquidate on floor breach (commit `6804f4e`)
+Dashboard now computes real PnL in-browser from multi-bucket inventory (wallet USDso + vault quote + native SOMI + base tokens), labeled "Real PnL (all buckets)". Leaderboard PnL used only for rank badge. `monitor/portfolio.py` exposes new `wallet_base` field with per-pair {qty, decimals, address} balances. `agent/agent.py` gains `_live_wallet_value()` reading wallet USDso + base tokens directly via RPC (avoiding 60s Portfolio cache staleness that let agent blow past $20 floor down to $8 yesterday), and `_liquidate_inventory(inventory)` auto-selling all wallet base >$1.50 back to USDso before halting. Floor check rewritten: when wallet USDso ≤ floor and inventory ≥$2, auto-liquidate; only halt if wallet is empty. Incident root cause: floor check trusted stale Portfolio cache instead of live wallet. Real internal value at recovery was ~$47.07 (basically unchanged; user never lost funds, just saw -$41 leaderboard PnL from mid-cycle base tokens). Agent paused post-restart for review; wallet $44.51, native 10.07 SOMI, tiny USDC.e dust.
+
 ### 2026-05-27 16:45 — Dashboard surfaces micro sub-agent alongside main orchestrator (commit `67a52a1`)
 Agent Control panel now has "Agent Control — Main" with orchestrator · $7–$15 marker, and a new read-only "Micro — sub-agent" block below showing the latest orchestrator-driven decision (outcome-coded icons: 🟢/🔴/🟡/🟠/⏸) plus tx count, mode, size band, and loop period. No controls on micro (brainless). `pollMicro()` on 5s cadence reads `/agent/micro`, renders status, appends `[micro] BUY/SELL` entries to activity log with outcome-aware icons. Main's entries now prefixed `[main]` for side-by-side legibility. Block auto-hides if `/agent/micro` returns 404 for backward compatibility. Deployed via `docker cp` (static file, no rebuild).
 
@@ -95,6 +98,8 @@ Rewrote full commit history via `git-filter-repo --replace-text` to redact sensi
 
 ## Lessons
 
+- **Portfolio cache staleness can defeat a capital-floor check.** When the floor matters for safety, read the live wallet via RPC inside the tick, not the cached refresher. The 60s stale Portfolio let the agent blow past $20 floor down to $8 USDso. Real on-chain value never dropped — base tokens were accumulating in the wallet mid-cycle — but the agent saw only stale cached USDso and halted prematurely. Solution: `_live_wallet_value()` queries live balances on every floor check so the agent always sees the truth.
+- **The leaderboard's PnL is wallet-USDso only. While trading, internal valuation must include base inventory + vaults.** The user saw -$41 PnL and thought funds were lost. On-chain audit showed wallet held ~$22 USDC.e + ~$15 WETH mid-cycle; real internal value ~$47.07 (basically unchanged). Dashboard PnL must count all buckets: wallet USDso + vault quote + native SOMI + wallet base tokens. The leaderboard formula is too narrow for confidence during normal trading cycles. Solution: compute real PnL in-browser from multi-bucket inventory, use leaderboard PnL only for the rank badge.
 - **SQLite `executescript` aborts on first failure and never runs the rest.** When adding a column with `ALTER TABLE` then creating an INDEX on that column in the same `executescript()` call, the index creation fails atomically and the whole block rolls back — even on already-migrated databases. Solution: split into separate `executescript()` calls or use individual `execute()` for each statement. ALTER + data migration + INDEX should be three separate calls so each can fail independently without blocking the others.
 - **CSS `theme()` calls don't resolve in plain `<style>` blocks loaded via Tailwind CDN.** When the Tailwind build doesn't happen at server startup, browsers can't find theme references. Use `:root` CSS variables with hard-coded hex values instead. This guarantees specificity wins even with `!important` overrides for `:active`-style states.
 - **Every code path that writes to the chain must also write to the analysis database.** If `ManualTrader.execute` skips `db.record_trade()` while `TradingAgent._log` always calls it, manual trades vanish from stats. Grep for all trade-execution paths (manual, automated, signal-based) and ensure every one records to the same DB table. This is load-bearing for accuracy metrics and LLM context.
@@ -114,20 +119,20 @@ Rewrote full commit history via `git-filter-repo --replace-text` to redact sensi
 
 ## Resume From Here
 
-**Dual-agent orchestrator deployed.** Main agent (orchestrator, $7–$15 / 120s) receives LLM-driven `decide_pair` output directing both its own trade and a queued decision for the micro agent (brainless, $2–$5 / 90s, profit-locked). Sequential dispatch prevents nonce races. Container live; main + micro both running. First post-restart orchestrator decision: `BUY WETH:USDso $15.00`. Wallet still ~$44.50 USDso; both agents sharing the same EOA so volume accumulates. Target: double the trading pairs' micro-driven fills without disrupting main agent's higher-volume moves.
+**Floor-breach auto-liquidation deployed; agent paused for review.** Dashboard now shows real multi-bucket PnL (wallet USDso + vault + native SOMI + base tokens) instead of leaderboard-only USDso. Agent has new `_live_wallet_value()` reading wallet balances via RPC every floor check (eliminating 60s cache staleness), and `_liquidate_inventory()` auto-selling all base tokens >$1.50 back to USDso before floor halt. Dual-agent orchestrator still active (main + micro on same EOA, sequential dispatch). Container paused after restart; wallet $44.51 USDso, native 10.07 SOMI, tiny USDC.e dust. Mode = GRIND, loop = 300s. Real internal PnL ~−$3.35 (full inventory valued).
 
 ### Next steps
-1. **Monitor dual-agent fills + nonce ordering.** Watch container logs for both agents' `/decision` and `/micro_decision` endpoints. Verify main's tx completes before micro's queued tx fires (sequential on same nonce lock). Both should report `running=true` with distinct agent names (main vs micro).
-2. **Verify micro fills happen.** Micro is brainless, so all its decisions come from orchestrator. Check `/agent/micro/stats` endpoint to confirm micro is recording trades (should see profit-locked trades at $2–$5 sizing).
-3. **Monitor double-sided volume.** Main agent's larger $7–$15 moves + micro's $2–$5 moves should increase total volume per tick without wallet conflicts (same EOA, sequential txs, nonce mgmt handles ordering).
+1. **Resume agent and verify auto-liquidation guards floor.** Unpause agent, watch container logs for floor checks reading live wallet via `_live_wallet_value()` on each tick. If a tick's inventory (base tokens + native) ≥$2 and wallet USDso ≤ floor, auto-liquidation should fire before halt.
+2. **Monitor dashboard Real PnL accuracy.** Verify dashboard computes PnL = wallet_USDso + vault_quote + native_SOMI + sum(wallet_base * price). Log should show this updates as base tokens arrive/leave wallet. Leaderboard PnL is now only for the rank badge — Real PnL is the source of truth.
+3. **Watch for mid-cycle base token accumulation.** If agent's BUY succeeds, wallet temporarily holds base token until SELL. During this period, old dashboard would show only USDso PnL; new dashboard should surface the base token's contribution. Confirm user no longer sees alarming -$X leaderboard PnL during normal trading cycles.
 
 ### Critical pointers
 | Item | Value |
 |---|---|
-| **Main agent mode** | PROFIT/$7–$15 per 120s (orchestrator) |
-| **Micro agent mode** | PROFIT-LOCKED at $2–$5 per 90s (brainless) |
-| **Brain function** | `decide_pair()` + `ORCHESTRATOR_PROMPT` (one LLM call per tick) |
-| **Dispatch** | Sequential: main executes, micro queued, both on same nonce lock |
-| **Wallet** | ~$44.50 USDso, shared EOA for both agents |
-| **DB migration** | Fixed: ALTER + INDEX now three separate calls, not one `executescript` |
-| **Micro endpoint** | `GET /agent/micro/stats` (brainless stats) |
+| **Floor check** | Now uses `_live_wallet_value()` via RPC, not stale Portfolio cache |
+| **Auto-liquidation** | Fires when wallet_USDso ≤ floor AND inventory ≥$2; sells all base >$1.50 before halt |
+| **Dashboard PnL** | "Real PnL (all buckets)" = wallet_USDso + vault_quote + native_SOMI + base_tokens |
+| **Leaderboard PnL** | Now only for rank badge, not used for confidence |
+| **Agent state** | Paused; wallet $44.51, native 10.07 SOMI, mode=GRIND, loop=300s |
+| **Dual-agent active** | Main (orchestrator) + micro (brainless) still running on same EOA, sequential dispatch |
+| **Lessons applied** | Cache staleness + multi-bucket PnL now documented in Lessons section |
