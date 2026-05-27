@@ -1,12 +1,19 @@
 # Progress — DreamDEX Contest Agent
 
-## Current Status
-
-**Live on mainnet, agent running in PROFIT mode at rank #2 of 11.** Wallet $44.50 USDso + ~16.5 SOMI native; 137 txns executed with 77 fills (~56% rate); $192+ volume traded; contest leaderboard PnL −$5.49. Dashboard shows live liquidity breakdown (wallet USDso, vault, native SOMI, manual reserve), mode badge (GRIND/PROFIT), and activity log streaming decisions. All fixes deployed: vault funding (mainnet only, wallet-funded fills; vault-funded never fills), auto-drain post-sell, two-sided vault-delta fill detection, grind/profit modes with rank-based auto-flip (≤2 → PROFIT, >3 → GRIND), shared LeaderboardMonitor for accurate rank display.
+**Live on mainnet, agent running in PROFIT mode with diversity rule at rank #2 of 11.** Wallet $44.50 USDso + ~16.5 SOMI native; 137 txns executed with 77 fills (~56% rate); $192+ volume traded; contest leaderboard PnL −$5.49. Brain now rotates trading pairs (SOMI/USDC.e/WETH) instead of spam-picking SOMI under PROFIT mode. Dashboard shows live liquidity breakdown (wallet USDso, vault, native SOMI, manual reserve), mode badge (GRIND/PROFIT), and activity log streaming decisions. All fixes deployed: vault funding (mainnet only, wallet-funded fills; vault-funded never fills), auto-drain post-sell, two-sided vault-delta fill detection, grind/profit modes with rank-based auto-flip (≤2 → PROFIT, >3 → GRIND), shared LeaderboardMonitor for accurate rank display.
 
 Stack: Python 3.11 + Flask + web3.py agent backend (Docker `network_mode: host`); ESP32-C3 + SSD1306 OLED watch; OpenAI gpt-4o-mini trading brain; dreamDEX REST + SIWE. Server `user@<SERVER_HOST>` (Tailscale), Cloudflare tunnel `<TUNNEL_HOST>` → `localhost:5001`. Git history scrubbed: all instances of API key, Tailscale IP, public domain, SSH user prefix, and bare domain replaced with placeholders.
 
 ## Completed
+
+### 2026-05-27 — SQLite-backed agent memory + rank-flip threshold fix (commit `89c65c0`)
+Added persistent agent state via sqlite at `/app/data/agent.db` (volume-mounted so it survives container rebuilds). New `backend/monitor/db.py` module exposes two tables (`trades`, `market_ticks`) and helpers: `record_trade`, `record_tick`, `last_trades`, `pnl_by_pair`, `recent_ticks`, `stats_summary`. Agent now records every tick's prices + 30-min momentum, and every trade attempt (success / skipped / placed_unfilled / reverted) is mirrored to sqlite from inside `_log`. Brain prompt's LAST N DECISIONS block now reads from the DB (deeper history, survives restarts) and includes a new PER-PAIR NET PnL section so the LLM can bias toward what's been working. New endpoint `GET /agent/stats` exposes totals + 24h per-pair PnL + last 20 trades. **Rank-flip threshold fix:** auto-flip profit→grind required `rank > 3`, which left rank #3 stuck in profit mode. Now uses `rank > 2`, so rank #3 immediately returns to grind. No hysteresis at the 2/3 boundary. Container rebuilt; currently at rank #3 of 11, grind mode active, reclaiming volume ($330 volume, trader-6 at rank #2 with $586).
+
+### 2026-05-26 — Diversity rule in PROFIT mode: rotate pairs across SOMI/USDC.e/WETH (commit `e37fa71`)
+Brain was repeatedly picking SOMI:USDso under PROFIT mode because SOMI's high volatility crosses the 0.3% momentum gate far more often than WETH (needs ~$6 absolute movement) or USDC.e (stable at $1.00, momentum always ~0%). Added DIVERSITY RULE to `PROFIT_PROMPT`: after closing a round-trip on pair X, next BUY avoids X. If only X has momentum, HOLD for a tick and let it cool down. `_build_prompt` now emits explicit "avoid X on next BUY" hint post-SELL so LLM doesn't drift back. GRIND prompt unchanged. Container redeployed; agent live at FST loop.
+
+### 2026-05-26 — Dashboard auto-derives BASE_URL from page origin; API key persists via localStorage (commit `a5318a2`)
+Live dashboard now auto-detects its URL from `window.location.origin` so it works wherever the backend serves it — only falls back to `<TUNNEL_HOST>` for `file://` testing. API key now reads from localStorage and persists after first entry via the modal. `CAPITAL_FLOOR` synced in firmware to match backend (22 → 35). Deployed to live server; no rebuild needed.
 
 ### 2026-05-26 23:59 — History scrub: git-filter-repo redacted secrets (6 rewrites)
 Rewrote full commit history via `git-filter-repo --replace-text` to redact sensitive identifiers from git objects: API key `ce0e9ce0c18c6dd0fd6555d115364e40` → `<FLASK_API_KEY>`, Tailscale IP `100.80.130.21` → `<SERVER_HOST>`, public domain `dreamdex.ironyaditya.xyz` → `<TUNNEL_HOST>`, SSH prefix `irony@` → `user@`, bare domain `ironyaditya.xyz` → `<EXAMPLE_DOMAIN>`. Six top commits re-authored for clarity: fill detection, config defaults, mode toggle, shared monitor + auto-drain, dashboard UX, and handover notes. **Important:** Original values are still in user's terminal history and must be rotated/regenerated before sharing repo with broader team. Placeholders need real values plugged in for any local dev work.
@@ -61,6 +68,7 @@ Rewrote full commit history via `git-filter-repo --replace-text` to redact sensi
 
 ## Lessons
 
+- **Off-by-one hysteresis at tier boundaries.** If a threshold like `rank > 3` keeps a tier (rank #3) stuck at the boundary with no recovery path, flip it to `rank > 2`. A tier that needs action to recover shouldn't be locked out of taking that action. No hysteresis gap needed — immediate flip is correct.
 - **Wallet-funded only.** Vault-funded IOC buys on dreamDEX mainnet never fill — USDso reserved then refunded 5–10 min later. Wallet-funded fills normally. This is the ONLY path that works on mainnet; never retry vault-funded as a fallback.
 - **Leaderboard PnL bleeds wallet, not vault.** The PnL formula reads ONLY wallet USDso (not vault quote, not vault base, not native SOMI). Sells credit USDso to vault; vault PnL looks good but wallet runway silently drains. Always auto-drain vault quote back to wallet post-sell on mainnet to preserve runway.
 - **Two-sided vault-delta is the real fill signal.** Single-side movement (quote only, or base only) can happen from gas refunds or unrelated vault ops. Require BOTH quote AND base (or quote AND native) to move in expected directions to confirm a fill. Single-side → `placed_unfilled` status prevents phantom round-trip sells.
@@ -72,17 +80,21 @@ Rewrote full commit history via `git-filter-repo --replace-text` to redact sensi
 
 ## Resume From Here
 
-**Agent is live and self-managing.** PROFIT mode, rank #2 of 11, loop NORMAL (300s). Container on `user@<SERVER_HOST>:~/dreamdex-agent/`, tunnel `<TUNNEL_HOST>` active. Firmware at `main`. Contest PnL -$5.49; real cost ~$5 across fills. Git history rewritten to redact secrets; placeholder values (`<FLASK_API_KEY>`, `<SERVER_HOST>`, `<TUNNEL_HOST>`, etc.) need real values for local dev. **Important:** Original literal values are in terminal history — rotate FLASK_API_KEY and regenerate secrets before sharing repo with team.
+**Agent now rank #3 with grind mode active — volume reclamation in progress.** SQLite memory is live; agent records every tick + trade to `/app/data/agent.db` (survives container rebuilds). Prompt now reads LAST N DECISIONS from DB (deeper history) + PER-PAIR NET PnL, so LLM can learn what pairs are working. New `/agent/stats` endpoint shows totals, 24h per-pair PnL, and last 20 trades. Rank-flip threshold fixed: rank #3 now immediately goes to grind (was stuck in profit with old `rank > 3` threshold). Current wallet $44.49 USDso + 16.4 SOMI, volume $330 (trader-6 at rank #2 with $586).
 
 ### Next steps
-1. **Container reset:** When Docker restarts (e.g., server reboot), loop reverts to NORMAL (300s). Set FST (120s) manually in watch Agent screen if higher volume desired.
-2. **Plug in placeholder values:** Any local dev work needs real values for `<FLASK_API_KEY>`, `<SERVER_HOST>`, `<TUNNEL_HOST>` in `.env` and firmware secrets.
-3. **Rotate FLASK_API_KEY:** Old literal key is in terminal transcripts even though git is clean. Generate a fresh key, update `.env` on server, update `#define API_KEY` in firmware, re-flash watch.
+1. **Monitor DB growth.** SQLite will populate over the next ticks. Use `/agent/stats` to audit trade history + PnL patterns post-restart.
+2. **Watch volume climb.** Grind mode should reclaim momentum trades — check if volume trends back above $400 to retake rank #2.
+3. **Verify prompt learning.** Brain should start biasing trades toward high-PnL pairs once the DB has 20+ samples. Early decisions may still be random due to cold start.
 
-### Vault drainage check (next 1-2 hours)
-- PROFIT mode just started firing momentum trades. Monitor next few fills: if they consistently beat GRIND baseline and PnL climbs, keep PROFIT; if flat or worse, revert to GRIND.
-- Auto-drain is live — wallet USDso should NOT bleed post-sells even though vault payout goes to vault.
-- If rank drops below #2 after a few fills, PROFIT mode auto-flips to GRIND (and back when rank >3).
+### Critical pointers
+| Item | Value |
+|---|---|
+| **Rank** | #3 of 11 (was #2, slipped with momentum trades) |
+| **Mode** | GRIND (auto-corrected from PROFIT when rank > 2) |
+| **DB path** | `/app/data/agent.db` (docker volume, survives restarts) |
+| **Stats endpoint** | `GET /agent/stats` (totals, 24h per-pair PnL, last 20 trades) |
+| **Threshold fix** | `rank > 2` now (was `rank > 3` — kept rank #3 stuck) |
 
 ### Critical pointers
 

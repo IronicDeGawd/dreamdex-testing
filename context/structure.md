@@ -13,12 +13,15 @@
 │   │   └── strategy.py              # Trading strategy (momentum, thresholds)
 │   ├── monitor/
 │   │   ├── __init__.py
+│   │   ├── db.py                    # SQLite persistence: trades, market_ticks, stats helpers
 │   │   ├── leaderboard.py           # LeaderboardMonitor (shared across server + agent)
 │   │   ├── portfolio.py             # Portfolio (reads pool balances via web3.py)
 │   │   └── prices.py                # Price fetcher (dreamDEX pools)
 │   ├── main.py                      # Entry point: spawn agent loop + leaderboard monitor
 │   ├── server.py                    # Flask API (SIWE auth, /api/order, /api/status)
 │   ├── config.py                    # Constants: MARKETS, pool addrs, decimals, thresholds
+│   ├── data/                        # SQLite DB volume (agent.db, persists across restarts)
+│   │   └── .gitkeep
 │   ├── Dockerfile                   # Docker image (Python 3.11, web3.py, openai)
 │   ├── docker-compose.yml           # Compose config (network_mode: host, .env secrets)
 │   ├── requirements.txt              # pip dependencies
