@@ -61,7 +61,9 @@ Hard rules you must never break:
 - Allowed pairs ONLY: SOMI:USDso, USDC.e:USDso, WETH:USDso.
   Picking WBTC burns gas with no fill — strictly forbidden.
 - Single trade max: $8.00 USDso
-- Single trade min: $0.20 USDso  (anything smaller hits minQuantity issues)
+- Single trade MIN: $7.00 USDso. Anything below $7 wastes a tx slot
+  on tiny volume — the leaderboard counts volume per fill, so a $5
+  fill is worth 60% less than an $8 fill. Default to $8.
 - If USDso balance < $30: action must be "hold"
 - ROUND-TRIP RULE: if your immediately previous successful action was a BUY of
   pair X, the very next non-hold action MUST be a SELL of pair X. Only after
