@@ -166,6 +166,39 @@ class TradingAgent:
                           self.state.history(), lb_data,
                           db_history=db_history, db_pnl=db_pnl)
         decision["time"] = _now()
+
+        # R8: in GRIND mode, refuse lazy HOLDs from the LLM. The only valid
+        # reasons to HOLD are wallet < floor or every allowed pair failing
+        # recently. The model otherwise hallucinates "waiting for next tick"
+        # and idle-burns ticks that should be sending volume.
+        try:
+            from agent import brain as _brain
+            if _brain.get_mode() == "grind" and decision.get("action") == "hold":
+                wallet_usdso = (self.portfolio.summary().get("agent_balance", 0)
+                                if self.portfolio else balances.get("usdso", 0))
+                # Compute the same avoid set the prompt sees
+                FAILS = {"would_revert","silent_reject","placed_unfilled","reverted","unverified"}
+                by_pair = {}
+                for t in db_history[:10]:
+                    by_pair.setdefault(t.get("pair"), []).append(t.get("status",""))
+                ALLOWED = ["SOMI:USDso", "USDC.e:USDso", "WETH:USDso"]
+                playable = [
+                    p for p in ALLOWED
+                    if not (len(by_pair.get(p, [])) >= 2 and all(s in FAILS for s in by_pair[p][:3]))
+                ]
+                if wallet_usdso >= AGENT_STOP_BELOW and playable:
+                    # Override the HOLD with a $8 BUY on the most-playable pair.
+                    chosen = playable[0]
+                    print(f"[agent] ⚠️  brain returned lazy HOLD; overriding → BUY {chosen} $8 (playable={playable})")
+                    decision = {
+                        "action": "buy", "pair": chosen, "amount_usdso": 8.0,
+                        "order_type": "market", "limit_price": None,
+                        "reason": f"override: lazy hold replaced ({chosen})",
+                        "confidence": 80, "time": _now(),
+                    }
+        except Exception as e:
+            print(f"[agent] hold-override check failed: {e}")
+
         self.last_decision = decision
         print(f"[agent] 🧠 {decision['action'].upper()} "
               f"| {decision.get('pair', '-')} "
