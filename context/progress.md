@@ -6,6 +6,9 @@ Stack: Python 3.11 + Flask + web3.py agent backend (Docker `network_mode: host`)
 
 ## Completed
 
+### 2026-05-27 — Three-state mode (GRIND / PROFIT / AUTO), sticky manual overrides (commit `04db1af`)
+Mode system upgraded from 2-state to 3-state. GRIND and PROFIT are now manual sticky overrides that disable auto-flip (set `auto=false`); AUTO re-enables rank-based behavior. Previously rank-based flip was always on, causing oscillation when leaderboard rank flickered at the 2/3 boundary. Now `brain.set_mode("grind"|"profit")` locks the mode and prevents rank-based flips until `set_mode("auto")` is called. `/agent/mode` GET returns `{mode, auto, selected}` (selected = user pick, mode = effective). Dashboard adds AUTO button; when AUTO is selected, shows live effective mode in parens (e.g. "AUTO (GRI)"). Currently mode locked to GRIND (sticky, auto=false), fast 120s loop, agent holds grind regardless of rank wobble.
+
 ### 2026-05-27 — SQLite-backed agent memory + rank-flip threshold fix (commit `89c65c0`)
 Added persistent agent state via sqlite at `/app/data/agent.db` (volume-mounted so it survives container rebuilds). New `backend/monitor/db.py` module exposes two tables (`trades`, `market_ticks`) and helpers: `record_trade`, `record_tick`, `last_trades`, `pnl_by_pair`, `recent_ticks`, `stats_summary`. Agent now records every tick's prices + 30-min momentum, and every trade attempt (success / skipped / placed_unfilled / reverted) is mirrored to sqlite from inside `_log`. Brain prompt's LAST N DECISIONS block now reads from the DB (deeper history, survives restarts) and includes a new PER-PAIR NET PnL section so the LLM can bias toward what's been working. New endpoint `GET /agent/stats` exposes totals + 24h per-pair PnL + last 20 trades. **Rank-flip threshold fix:** auto-flip profit→grind required `rank > 3`, which left rank #3 stuck in profit mode. Now uses `rank > 2`, so rank #3 immediately returns to grind. No hysteresis at the 2/3 boundary. Container rebuilt; currently at rank #3 of 11, grind mode active, reclaiming volume ($330 volume, trader-6 at rank #2 with $586).
 
@@ -68,6 +71,7 @@ Rewrote full commit history via `git-filter-repo --replace-text` to redact sensi
 
 ## Lessons
 
+- **Hysteresis flips need an explicit opt-in flag when manual overrides exist.** Rank-based auto-flips work for fully automatic systems, but when you add sticky manual mode-locks (e.g., lock to GRIND, disable auto-flip), the auto flip becomes a distraction — users expect their manual pick to stick until explicitly overridden. Solution: add an `auto` flag (default true); set_mode("grind"/"profit") sets `auto=false`, re-enabling requires explicit set_mode("auto"). This prevents rank wobble from fighting user intent.
 - **Off-by-one hysteresis at tier boundaries.** If a threshold like `rank > 3` keeps a tier (rank #3) stuck at the boundary with no recovery path, flip it to `rank > 2`. A tier that needs action to recover shouldn't be locked out of taking that action. No hysteresis gap needed — immediate flip is correct.
 - **Wallet-funded only.** Vault-funded IOC buys on dreamDEX mainnet never fill — USDso reserved then refunded 5–10 min later. Wallet-funded fills normally. This is the ONLY path that works on mainnet; never retry vault-funded as a fallback.
 - **Leaderboard PnL bleeds wallet, not vault.** The PnL formula reads ONLY wallet USDso (not vault quote, not vault base, not native SOMI). Sells credit USDso to vault; vault PnL looks good but wallet runway silently drains. Always auto-drain vault quote back to wallet post-sell on mainnet to preserve runway.
@@ -80,12 +84,12 @@ Rewrote full commit history via `git-filter-repo --replace-text` to redact sensi
 
 ## Resume From Here
 
-**Agent now rank #3 with grind mode active — volume reclamation in progress.** SQLite memory is live; agent records every tick + trade to `/app/data/agent.db` (survives container rebuilds). Prompt now reads LAST N DECISIONS from DB (deeper history) + PER-PAIR NET PnL, so LLM can learn what pairs are working. New `/agent/stats` endpoint shows totals, 24h per-pair PnL, and last 20 trades. Rank-flip threshold fixed: rank #3 now immediately goes to grind (was stuck in profit with old `rank > 3` threshold). Current wallet $44.49 USDso + 16.4 SOMI, volume $330 (trader-6 at rank #2 with $586).
+**Mode now sticky-GRIND (auto=false, rank-flips disabled) — agent holds trading strategy regardless of leaderboard rank wobble.** Three-state mode system live: manual overrides (GRIND/PROFIT) lock the mode and disable auto-flip; AUTO re-enables rank-based behavior. SQLite memory is live; agent records every tick + trade to `/app/data/agent.db` (survives rebuilds). Prompt reads LAST N DECISIONS from DB + PER-PAIR NET PnL. New `/agent/stats` endpoint shows totals, 24h per-pair PnL, and last 20 trades. Dashboard has AUTO button; when selected, shows live effective mode in parens. Current wallet $44.49 USDso + 16.4 SOMI, volume $330 (rank #3 of 11).
 
 ### Next steps
-1. **Monitor DB growth.** SQLite will populate over the next ticks. Use `/agent/stats` to audit trade history + PnL patterns post-restart.
-2. **Watch volume climb.** Grind mode should reclaim momentum trades — check if volume trends back above $400 to retake rank #2.
-3. **Verify prompt learning.** Brain should start biasing trades toward high-PnL pairs once the DB has 20+ samples. Early decisions may still be random due to cold start.
+1. **Monitor sticky grind mode.** With auto=false, agent stays in grind regardless of rank swings at 2/3 boundary. Verify volume grows without oscillation.
+2. **Watch dashboard mode display.** When AUTO is selected, verify the mode badge shows effective state (e.g. "AUTO (GRI)" or "AUTO (PRO)").
+3. **Test manual mode toggles.** Switch GRIND → PROFIT → AUTO via dashboard API and confirm `/agent/mode` returns correct `{mode, auto, selected}` tuple.
 
 ### Critical pointers
 | Item | Value |
