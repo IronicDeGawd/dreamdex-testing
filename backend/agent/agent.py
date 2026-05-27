@@ -324,6 +324,9 @@ class TradingAgent:
         # Log
         log_entry = {**decision, "qty": qty, "result": result, "mid": mid}
         self._log(log_entry)
+        # Expose the trade outcome on last_decision so the dashboard activity
+        # log can distinguish on-chain success from sim-rejected attempts.
+        self.last_decision["result_status"] = result.get("status")
         # Only mutate local state on vault-delta-PROVEN success. silent_reject,
         # unverified, reverted, error all skip — they either didn't move money
         # or can't be authoritatively confirmed.
