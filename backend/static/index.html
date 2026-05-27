@@ -237,9 +237,9 @@
                         <div class="text-xs text-textMuted mt-1">Wallet USDso + Vault USDso + Native SOMI at mid-price.</div>
                     </div>
                     <div>
-                        <div class="text-xs text-textMuted uppercase mb-1">Contest PnL (wallet only)</div>
+                        <div class="text-xs text-textMuted uppercase mb-1">Real PnL (all buckets)</div>
                         <div class="font-mono text-2xl" id="port-pnl">$--.-- (0.0%)</div>
-                        <div class="text-xs text-textMuted mt-1">Leaderboard PnL = wallet USDso − $50. Vault &amp; SOMI don't count here.</div>
+                        <div class="text-xs text-textMuted mt-1">Internal valuation = wallet USDso + vault + base inventory @ mid + native @ mid − $50. The leaderboard's wallet-only PnL is shown only for rank purposes.</div>
                     </div>
                     <div>
                         <div class="text-xs text-textMuted uppercase mb-1">Volume / Fills</div>
@@ -994,24 +994,52 @@ cd ~ && rm -rf ~/dreamdex-agent</pre>
                     el.portStale.classList.add('hidden');
                 }
 
-                // Numbers
-                el.portTotal.textContent = `$${formatMoney(data.total_value)}`;
-                const pnl = data.total_value - INITIAL_SEED;
-                const pnlPct = (pnl / INITIAL_SEED) * 100;
-                
-                el.portPnl.textContent = `${pnl >= 0 ? '+' : '-'}$${formatMoney(Math.abs(pnl))} (${pnlPct > 0 ? '+' : ''}${pnlPct.toFixed(2)}%)`;
-                if (pnl < 0) {
-                    el.portPnl.className = 'font-mono text-2xl text-danger';
-                } else {
-                    el.portPnl.className = 'font-mono text-2xl text-textMain';
-                }
-
+                // Compute REAL total value internally — wallet USDso + vault USDso +
+                // native SOMI valued at mid + per-pair wallet inventory valued at
+                // mid. The leaderboard's wallet-only number under-reports during
+                // mid-cycle, so we ignore it for PnL display.
                 const vaultTotal = Object.values(data.usdso_vaults || {}).reduce((a, b) => a + b, 0);
-                const nativeBal = data.native_balance || 0;
+                const nativeBal  = data.native_balance || 0;
+                const prices     = state.prices || {};
+                let inventoryUsd = 0;
+                let inventoryBreakdown = []; // for tooltip / detail
+                const walletBase = data.wallet_base || {};
+                for (const [pair, info] of Object.entries(walletBase)) {
+                    const qty = info.qty || 0;
+                    if (qty <= 0) continue;
+                    if (pair === 'SOMI:USDso') continue; // counted via native below
+                    const mid = (prices[pair] || {}).mid || 0;
+                    const usd = qty * mid;
+                    if (usd > 0.01) {
+                        inventoryUsd += usd;
+                        inventoryBreakdown.push(`${qty.toFixed(4)} ${pair.split(':')[0]} (~$${usd.toFixed(2)})`);
+                    }
+                }
+                const somiMid    = (prices['SOMI:USDso'] || {}).mid || 0;
+                const nativeUsd  = nativeBal * somiMid;
+                const totalUsd   = (data.usdso_wallet || 0) + vaultTotal + inventoryUsd + nativeUsd;
+
+                el.portTotal.textContent = `$${formatMoney(totalUsd)}`;
+                const pnl = totalUsd - INITIAL_SEED;
+                const pnlPct = (pnl / INITIAL_SEED) * 100;
+                el.portPnl.textContent = `${pnl >= 0 ? '+' : '-'}$${formatMoney(Math.abs(pnl))} (${pnlPct > 0 ? '+' : ''}${pnlPct.toFixed(2)}%)`;
+                el.portPnl.className = 'font-mono text-2xl ' + (pnl < 0 ? 'text-danger' : 'text-success');
+
                 el.liqWallet.textContent = `$${formatMoney(data.usdso_wallet)}`;
-                el.liqVault.textContent = `$${formatMoney(vaultTotal)}`;
-                el.liqNative.textContent = `${nativeBal.toFixed(4)} SOMI`;
+                el.liqVault.textContent  = `$${formatMoney(vaultTotal)}`;
+                el.liqNative.textContent = `${nativeBal.toFixed(4)} SOMI (~$${nativeUsd.toFixed(2)})`;
                 el.liqVault.className = 'col-span-2 py-1.5 px-3 text-right ' + (vaultTotal > 0.5 ? 'text-warning' : '');
+                // Surface base inventory next to manual reserve so the user can
+                // see exactly how much value is sitting as base tokens.
+                if (el.liqManual && inventoryBreakdown.length) {
+                    el.liqManual.textContent = `+ $${inventoryUsd.toFixed(2)} inventory`;
+                    el.liqManual.title = inventoryBreakdown.join(' · ');
+                    el.liqManual.style.color = 'var(--c-warning)';
+                } else if (el.liqManual) {
+                    el.liqManual.textContent = '$20.00';
+                    el.liqManual.title = '';
+                    el.liqManual.style.color = '';
+                }
 
                 // Render Stacked Bar
                 const totalBalance = data.agent_balance || 0.01; // avoid /0

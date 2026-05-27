@@ -80,10 +80,6 @@ class Portfolio:
         me    = Web3.to_checksum_address(MY_ADDRESS)
         usdso = Web3.to_checksum_address(USDSO_ADDRESS)
 
-        # H4: divide by the pool's actual quoteDecimals, not a hardcoded 1e18.
-        # USDso is 18d today but the pattern would silently break a base-token
-        # vault check on WBTC (8d) or USDC.e (6d).
-        # USDso's own decimals come from any pool's quoteDecimals (they're identical).
         usdso_decimals = 18
         for _mkt in MARKETS.values():
             usdso_decimals = int(_mkt.get("quoteDecimals", 18))
@@ -100,6 +96,11 @@ class Portfolio:
 
         # Vault balances per pool (USDso side — quoteDecimals scaling)
         vault_totals: dict[str, float] = {}
+        # Base-token (inventory) balances in the wallet — what the agent
+        # has bought but not yet sold back to USDso. The contest leaderboard
+        # only sees USDso, so this inventory looks like "loss" to the dashboard
+        # unless we surface and value it ourselves.
+        wallet_base: dict[str, dict] = {}
         for pair, mkt in MARKETS.items():
             try:
                 pool = self.w3.eth.contract(
@@ -107,35 +108,61 @@ class Portfolio:
                 )
                 raw = pool.functions.getWithdrawableBalance(me, usdso).call()
                 vault_totals[pair] = raw / (10 ** int(mkt.get("quoteDecimals", 18)))
-            except Exception as e:
+            except Exception:
                 vault_totals[pair] = 0.0
 
-        total_vault = sum(vault_totals.values())
-        total_usdso = wallet_usdso + total_vault
+            # Read wallet base balance per pair (for non-native pools).
+            # Native pools (SOMI) report base via eth_getBalance below.
+            base_addr = mkt.get("base")
+            base_dec  = int(mkt.get("baseDecimals", 18))
+            if mkt.get("native"):
+                wallet_base[pair] = {"qty": 0.0, "decimals": base_dec, "address": None}
+                continue
+            if not base_addr or int(base_addr, 16) == 0:
+                wallet_base[pair] = {"qty": 0.0, "decimals": base_dec, "address": None}
+                continue
+            try:
+                erc20_base = self.w3.eth.contract(
+                    address=Web3.to_checksum_address(base_addr), abi=ERC20_ABI
+                )
+                raw_b = erc20_base.functions.balanceOf(me).call()
+                wallet_base[pair] = {
+                    "qty": raw_b / (10 ** base_dec),
+                    "decimals": base_dec,
+                    "address": base_addr,
+                }
+            except Exception:
+                wallet_base[pair] = {"qty": 0.0, "decimals": base_dec, "address": base_addr}
 
-        # Native gas-token balance (SOMI on mainnet, STT on testnet) — small
-        # quantity used for tx gas. Expose so the dashboard can show "gas:".
+        total_vault = sum(vault_totals.values())
+
+        # Native gas-token balance.
         try:
             native_wei = self.w3.eth.get_balance(me)
             native_balance = native_wei / 1e18
         except Exception:
             native_balance = 0.0
 
+        # The native pool's base lives in native_balance directly.
+        for pair, mkt in MARKETS.items():
+            if mkt.get("native"):
+                wallet_base[pair]["qty"] = native_balance
+                break
+
+        # All-buckets internal valuation. This is what the dashboard should
+        # show as PnL — NOT the leaderboard's wallet-only number, which
+        # under-reports value while inventory is mid-cycle. Mid-prices come
+        # from server.py at read time; the Portfolio just exposes raw qty.
         with self._lock:
             self._stats = {
-                # Single source of truth for the wallet's USDso position.
-                "agent_balance":  total_usdso,
-                # Reserved "manual" budget is purely a planning device — there is
-                # no separate manual wallet. Kept for backward compat but no
-                # longer summed into total_value.
+                "agent_balance":  wallet_usdso + total_vault,
                 "manual_balance": MANUAL_CAPITAL,
-                # Real on-chain total of trade-able USDso (wallet + all pool vaults).
-                # NOT inflated by a phantom manual reserve. Dashboard PnL = total_value - 50.
-                "total_value":    total_usdso,
+                "total_value":    wallet_usdso + total_vault,  # dashboard recomputes with base inventory
                 "usdso_wallet":   wallet_usdso,
                 "usdso_vaults":   vault_totals,
-                "native_balance": native_balance,        # SOMI/STT for gas
-                "last_refresh":   time.time(),           # C2: agent uses this to detect stale data
+                "native_balance": native_balance,
+                "wallet_base":    wallet_base,   # per-pair {qty, decimals, address}
+                "last_refresh":   time.time(),
             }
 
     def summary(self) -> dict:

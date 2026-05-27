@@ -94,6 +94,68 @@ class TradingAgent:
     def pause(self):  self.paused = True
     def resume(self): self.paused = False
 
+    # ── Live inventory read (used by the floor check) ─────────────────
+    def _live_wallet_value(self, prices_unused=None):
+        """Read live wallet USDso + per-pair base inventory via RPC. Returns
+        (wallet_usdso, {pair: usd_value}). Read directly so the floor check
+        sees the actual chain state, not the 60s-stale Portfolio cache."""
+        try:
+            from web3 import Web3
+            from config import MARKETS, USDSO_ADDRESS
+            w3 = self.dex.wallet.w3
+            me = Web3.to_checksum_address(self.dex.wallet.address)
+            erc20_abi = [{"name":"balanceOf","type":"function","stateMutability":"view",
+                          "inputs":[{"name":"a","type":"address"}],"outputs":[{"name":"","type":"uint256"}]}]
+            usdso = Web3.to_checksum_address(USDSO_ADDRESS)
+            wal_usdso = w3.eth.contract(address=usdso, abi=erc20_abi).functions.balanceOf(me).call() / 1e18
+            prices = self.analyzer.get_snapshot()
+            inv: dict[str, float] = {}
+            for pair, mkt in MARKETS.items():
+                mid = (prices.get(pair) or {}).get("mid") or 0
+                if not mid:
+                    continue
+                if mkt.get("native"):
+                    qty = w3.eth.get_balance(me) / 1e18
+                    # Keep a small gas reserve — don't sell our last 2 SOMI.
+                    sellable = max(0, qty - 2.0)
+                    inv[pair] = sellable * mid
+                    continue
+                base = mkt.get("base")
+                if not base or int(base, 16) == 0:
+                    continue
+                dec = int(mkt.get("baseDecimals", 18))
+                try:
+                    raw = w3.eth.contract(address=Web3.to_checksum_address(base), abi=erc20_abi).functions.balanceOf(me).call()
+                    qty = raw / (10 ** dec)
+                    inv[pair] = qty * mid
+                except Exception:
+                    inv[pair] = 0.0
+            return wal_usdso, inv
+        except Exception as e:
+            print(f"[{self.name}] live_wallet_value failed: {e}")
+            return None, {}
+
+    def _liquidate_inventory(self, inventory: dict):
+        """Sell every non-USDso wallet position worth > $1.50 back to USDso.
+        Called from the floor-breach branch in _tick before halting."""
+        for pair, usd in sorted(inventory.items(), key=lambda kv: -kv[1]):
+            if usd < 1.50:
+                continue
+            try:
+                print(f"[{self.name}] 💸 liquidating {pair} (~${usd:.2f}) → USDso")
+                # amount_usdso is what the SELL targets in USDso terms; the
+                # manual trader sizes the qty from this against mid-price.
+                # Use slightly under the inventory value so we don't trip
+                # the minQty bump.
+                target = round(usd * 0.97, 2)
+                res = self.dex.place_order(
+                    symbol=pair, side="sell", qty=target / (self.analyzer.get_snapshot().get(pair, {}).get("mid") or 1),
+                    order_type="market",
+                )
+                print(f"[{self.name}] liquidation {pair}: {res.get('status','?')}")
+            except Exception as e:
+                print(f"[{self.name}] liquidation {pair} failed: {e}")
+
     def set_speed(self, speed: str):
         speeds = {"slow": 600, "normal": 300, "fast": 120, "max": 45}
         self.loop_secs = speeds.get(speed.lower(), 300)
@@ -159,15 +221,19 @@ class TradingAgent:
             }
             return
 
-        # 1. Capital-floor safety check (C2 fix: use on-chain Portfolio truth,
-        #    not local AgentState which drifts on silent rejects + mid-vs-fill).
-        #    Falls back to local state only if Portfolio is missing — never on mainnet.
-        chain_usdso = None
-        if self.portfolio is not None:
+        # 1. Capital-floor safety check. Reads a LIVE wallet USDso balance
+        # via RPC instead of trusting the 60s-stale Portfolio cache (which
+        # let us blow past $20 floor down to $8 in the last incident).
+        # When the floor is breached, AUTO-LIQUIDATE wallet inventory (USDC.e,
+        # WETH, WBTC, native SOMI down to a small gas reserve) back to USDso
+        # before halting — that keeps trading sustainable instead of dead-
+        # ending when round-trips accidentally accumulate base tokens.
+        live_usdso, live_inventory = self._live_wallet_value(prices_unused=None)
+        chain_usdso = live_usdso
+        if chain_usdso is None and self.portfolio is not None:
             stats = self.portfolio.summary()
             chain_usdso = stats.get("agent_balance")
             last_ref = stats.get("last_refresh", 0)
-            # Hold if portfolio is stale (>120s since last successful refresh)
             if last_ref and time.time() - last_ref > 120:
                 print(f"[{self.name}] ⚠️  Portfolio stale ({int(time.time() - last_ref)}s) — holding")
                 self.last_decision = {
@@ -177,10 +243,23 @@ class TradingAgent:
                 return
         balances = self.state.balances()
         usdso_for_floor = chain_usdso if chain_usdso is not None else balances["usdso"]
-        if usdso_for_floor <= AGENT_STOP_BELOW:   # L1 fix: <=, not <, so $22 itself blocks
-            print(f"[{self.name}] ⚠️  USDso ${usdso_for_floor:.2f} <= floor ${AGENT_STOP_BELOW:.2f} — holding")
+        if usdso_for_floor <= AGENT_STOP_BELOW:
+            # Before halting: is there inventory to liquidate?
+            inv_usd = sum(live_inventory.values()) if live_inventory else 0
+            if inv_usd >= 2.0:
+                print(f"[{self.name}] ⚠️  Wallet USDso ${usdso_for_floor:.2f} <= floor ${AGENT_STOP_BELOW:.2f} but ${inv_usd:.2f} of inventory exists — auto-liquidating before halt")
+                try:
+                    self._liquidate_inventory(live_inventory)
+                except Exception as e:
+                    print(f"[{self.name}] liquidation failed: {e}")
+                self.last_decision = {
+                    "action": "hold", "reason": f"auto-liquidated inventory (recovered ~${inv_usd:.2f})",
+                    "confidence": 100, "time": _now()
+                }
+                return
+            print(f"[{self.name}] ⚠️  USDso ${usdso_for_floor:.2f} <= floor ${AGENT_STOP_BELOW:.2f}, no inventory to liquidate — holding")
             self.last_decision = {
-                "action": "hold", "reason": "capital floor hit",
+                "action": "hold", "reason": "capital floor hit (nothing to recover)",
                 "confidence": 100, "time": _now()
             }
             return
