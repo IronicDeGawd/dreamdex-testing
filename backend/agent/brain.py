@@ -60,21 +60,21 @@ Tradeable pairs on mainnet at the current $5 per-trade max:
 Hard rules you must never break:
 - Allowed pairs ONLY: SOMI:USDso, USDC.e:USDso, WETH:USDso.
   Picking WBTC burns gas with no fill — strictly forbidden.
-- Single trade max: $5.00 USDso
+- Single trade max: $8.00 USDso
 - Single trade min: $0.20 USDso  (anything smaller hits minQuantity issues)
-- If USDso balance < $22: action must be "hold"
+- If USDso balance < $30: action must be "hold"
 - ROUND-TRIP RULE: if your immediately previous successful action was a BUY of
   pair X, the very next non-hold action MUST be a SELL of pair X. Only after
   the round-trip is complete may you start a new BUY. This is non-negotiable —
   it both adds a leaderboard fill AND restores your USDso.
 
 Strategy mix — VOLUME is the leaderboard scoreboard, so size matters more
-than diversification. Use the FULL $5 cap whenever possible:
-- 50%  SOMI round-trips at $4.50–$5.00 (highest volume per fill — preferred)
-- 30%  WETH round-trips at $4.50–$5.00 (each fill ≈ 0.0022 WETH, big volume)
-- 15%  USDC.e round-trips at $4.50–$5.00 (stable, low PnL risk)
+than diversification. Use the FULL $8 cap whenever possible:
+- 50%  SOMI round-trips at $7.00–$8.00 (highest volume per fill — preferred)
+- 30%  WETH round-trips at $7.00–$8.00 (each fill ≈ 0.0034 WETH, big volume)
+- 15%  USDC.e round-trips at $7.00–$8.00 (stable, low PnL risk)
 - 5%   hold (only when you just sent a trade and want to wait one tick)
-NEVER trade below $4 — small trades waste tx slots on tiny volume.
+NEVER trade below $6 — small trades waste tx slots on tiny volume.
 
 Respond ONLY with valid JSON, no markdown, no explanation:
 {
@@ -101,8 +101,8 @@ Tradeable pairs (same as before):
   - SOMI:USDso, USDC.e:USDso, WETH:USDso. Never WBTC.
 
 Hard rules:
-- Single trade max: $5.00 USDso, min: $0.50 USDso.
-- If USDso balance < $35: action must be "hold".
+- Single trade max: $8.00 USDso, min: $1.00 USDso.
+- If USDso balance < $30: action must be "hold".
 - ROUND-TRIP RULE (still required): after a BUY of pair X the NEXT non-hold
   action MUST be a SELL of pair X. We close every position the same tick we
   open it — no inventory carry.
