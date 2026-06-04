@@ -3,14 +3,9 @@ import json, os, requests
 from config import OPENAI_API, OPENAI_MODEL, AGENT_CONFIDENCE_MIN, ENV
 
 # Runtime mode state.
-#   AGENT_MODE: "grind" or "profit" — the *effective* mode the brain runs in
-#   AGENT_AUTO: True  → rank-based auto-flip is allowed to change AGENT_MODE
-#               False → AGENT_MODE is sticky; nothing changes it until the
-#                       user POSTs /agent/mode again
-# User-facing values via /agent/mode:
-#   "grind"  → AGENT_MODE=grind,  AGENT_AUTO=False (manual override)
-#   "profit" → AGENT_MODE=profit, AGENT_AUTO=False (manual override)
-#   "auto"   → AGENT_AUTO=True, next tick picks grind/profit from rank
+#   AGENT_MODE: "grind" or "profit" — the *effective* mode
+#   AGENT_AUTO: rank-based auto-flip enabled
+ALLOWED_MODES = ("grind", "profit")
 AGENT_MODE = os.environ.get("AGENT_MODE", "grind")
 AGENT_AUTO = os.environ.get("AGENT_AUTO_FLIP", "false").lower() in ("1", "true", "yes")
 
@@ -20,7 +15,7 @@ def set_mode(mode: str):
     if mode == "auto":
         AGENT_AUTO = True
         return
-    if mode not in ("grind", "profit"):
+    if mode not in ALLOWED_MODES:
         raise ValueError(f"unknown mode: {mode}")
     AGENT_MODE = mode
     AGENT_AUTO = False  # manual selection disables the rank-based flip
@@ -29,7 +24,7 @@ def set_mode_internal(mode: str):
     """Internal setter used by the rank auto-flip. Does NOT change AGENT_AUTO
     so that manual grind/profit selections stay sticky."""
     global AGENT_MODE
-    if mode not in ("grind", "profit"):
+    if mode not in ALLOWED_MODES:
         raise ValueError(f"unknown mode: {mode}")
     AGENT_MODE = mode
 
