@@ -7,7 +7,7 @@ class ManualTrader:
     def __init__(self):
         self.dex = DreamDEX()
 
-    def execute(self, pair: str, side: str, amount_usdso: float, prices: dict = None) -> dict:
+    def execute(self, pair: str, side: str, amount_usdso: float, prices: dict = None, skip_sim: bool = False) -> dict:
         print(f"[ManualTrader] Triggered manual trade: {side} {pair} for ${amount_usdso}")
 
         if not prices:
@@ -42,7 +42,8 @@ class ManualTrader:
             symbol=pair,
             side=side,
             qty=qty,
-            order_type="market"
+            order_type="market",
+            skip_sim=skip_sim,
         )
 
         # Mirror to sqlite so manual trades show up in /agent/stats alongside
