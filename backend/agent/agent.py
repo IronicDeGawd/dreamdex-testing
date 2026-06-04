@@ -136,25 +136,40 @@ class TradingAgent:
             return None, {}
 
     def _liquidate_inventory(self, inventory: dict):
-        """Sell every non-USDso wallet position worth > $1.50 back to USDso.
-        Called from the floor-breach branch in _tick before halting."""
-        for pair, usd in sorted(inventory.items(), key=lambda kv: -kv[1]):
-            if usd < 1.50:
-                continue
-            try:
-                print(f"[{self.name}] 💸 liquidating {pair} (~${usd:.2f}) → USDso")
-                # amount_usdso is what the SELL targets in USDso terms; the
-                # manual trader sizes the qty from this against mid-price.
-                # Use slightly under the inventory value so we don't trip
-                # the minQty bump.
-                target = round(usd * 0.97, 2)
-                res = self.dex.place_order(
-                    symbol=pair, side="sell", qty=target / (self.analyzer.get_snapshot().get(pair, {}).get("mid") or 1),
-                    order_type="market",
-                )
-                print(f"[{self.name}] liquidation {pair}: {res.get('status','?')}")
-            except Exception as e:
-                print(f"[{self.name}] liquidation {pair} failed: {e}")
+        """Sell ONE chunk of the biggest inventory position back to USDso.
+        Capped at self.max_trade per call so a single fat IOC doesn't sim-
+        revert when the book can't absorb it. Called from the floor-breach
+        branch each tick — multi-tick drain instead of one-shot.
+
+        Previous behaviour tried to sell the whole stack in a single IOC
+        (e.g. 145 SOMI ~ $24) which the on-chain matching engine rejected
+        every time, causing the floor breach to recur every tick while
+        the inventory never actually decreased.
+        """
+        # Pick the single biggest position worth > $1.50. Sell only ONE
+        # chunk this tick, capped at max_trade.
+        big = [(p, usd) for p, usd in inventory.items() if usd >= 1.50]
+        if not big:
+            print(f"[{self.name}] 💸 no chunk worth liquidating (all < $1.50)")
+            return
+        big.sort(key=lambda kv: -kv[1])
+        pair, usd = big[0]
+        mid = (self.analyzer.get_snapshot().get(pair, {}) or {}).get("mid") or 0
+        if not mid:
+            print(f"[{self.name}] 💸 no price for {pair}, skip liquidation")
+            return
+        # One-shot chunk: min(inventory, max_trade). 0.97 multiplier to avoid
+        # tripping minQty rounding.
+        target_usd = min(self.max_trade, usd) * 0.97
+        sell_qty = target_usd / mid
+        try:
+            print(f"[{self.name}] 💸 liquidating chunk: {pair} qty={sell_qty:.4f} (~${target_usd:.2f}, inventory total ${usd:.2f})")
+            res = self.dex.place_order(
+                symbol=pair, side="sell", qty=sell_qty, order_type="market",
+            )
+            print(f"[{self.name}] liquidation {pair}: {res.get('status','?')}")
+        except Exception as e:
+            print(f"[{self.name}] liquidation {pair} failed: {e}")
 
     def set_speed(self, speed: str):
         speeds = {"slow": 600, "normal": 300, "fast": 120, "max": 45}
