@@ -175,6 +175,102 @@ def last_trades(limit: int = 20, agent_name: str | None = None) -> list[dict]:
         return []
 
 
+def fill_stats(since_hours: int = 2, agent_name: str | None = None) -> dict:
+    """Empirical fill rates and net PnL per (pair, size_bucket) over the
+    recent window. The brain consumes this to learn — from real chain
+    behaviour — which (pair, size) combinations actually fill.
+
+    Returns:
+      {
+        "SOMI:USDso": [
+          {"size": "$1-3",  "attempts": 12, "fills": 11, "rate": 0.92, "net": +0.08},
+          {"size": "$3-6",  "attempts": 28, "fills": 22, "rate": 0.79, "net": +1.20},
+          {"size": "$6-10", "attempts": 45, "fills": 27, "rate": 0.60, "net": -0.40},
+          {"size": "$10+",  "attempts": 30, "fills": 13, "rate": 0.43, "net": -0.85},
+        ],
+        ...
+      }
+    """
+    since = time.time() - since_hours * 3600
+    buckets = [
+        (0,    3,   "$1-3"),
+        (3,    6,   "$3-6"),
+        (6,    10,  "$6-10"),
+        (10,   16,  "$10-16"),
+        (16,   1e9, "$16+"),
+    ]
+    out: dict[str, list[dict]] = {}
+    try:
+        with _LOCK, _conn() as c:
+            where_agent = ""
+            params: list = [since]
+            if agent_name:
+                where_agent = " AND agent_name = ?"
+                params.append(agent_name)
+            for lo, hi, label in buckets:
+                rows = c.execute(
+                    f"""SELECT pair, action,
+                              COUNT(*) AS attempts,
+                              SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) AS fills,
+                              SUM(CASE WHEN status='success' AND action='buy'  THEN -amount_usdso ELSE 0 END) AS spent,
+                              SUM(CASE WHEN status='success' AND action='sell' THEN  amount_usdso ELSE 0 END) AS earned
+                       FROM trades
+                       WHERE ts > ? {where_agent} AND amount_usdso >= ? AND amount_usdso < ? AND pair IS NOT NULL
+                       GROUP BY pair""",
+                    tuple(params) + (lo, hi),
+                ).fetchall()
+                for r in rows:
+                    pair = r["pair"]
+                    out.setdefault(pair, [])
+                    attempts = int(r["attempts"] or 0)
+                    fills    = int(r["fills"]    or 0)
+                    net      = float((r["spent"] or 0) + (r["earned"] or 0))
+                    if attempts == 0:
+                        continue
+                    out[pair].append({
+                        "size": label,
+                        "attempts": attempts,
+                        "fills": fills,
+                        "rate": round(fills / attempts, 2),
+                        "net":  round(net, 2),
+                    })
+    except Exception as e:
+        print(f"[db] fill_stats failed: {e}")
+    return out
+
+
+def consecutive_fail_streak(pair: str, agent_name: str | None = None, limit: int = 20) -> int:
+    """How many of the most-recent N trades for this pair were failures
+    (no successes in between). Used by the avoid-list to flag pairs only
+    when failures are PERSISTENT, not transient."""
+    FAILS = {"would_revert", "silent_reject", "placed_unfilled", "reverted", "unverified", "error"}
+    try:
+        with _LOCK, _conn() as c:
+            if agent_name:
+                rows = c.execute(
+                    """SELECT status FROM trades
+                       WHERE pair = ? AND agent_name = ?
+                       ORDER BY id DESC LIMIT ?""",
+                    (pair, agent_name, limit),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    """SELECT status FROM trades
+                       WHERE pair = ? ORDER BY id DESC LIMIT ?""",
+                    (pair, limit),
+                ).fetchall()
+            streak = 0
+            for r in rows:
+                if (r["status"] or "") in FAILS:
+                    streak += 1
+                else:
+                    break
+            return streak
+    except Exception as e:
+        print(f"[db] consecutive_fail_streak failed: {e}")
+        return 0
+
+
 def pnl_by_pair(since_hours: int = 24) -> dict:
     """Approximate per-pair net USDso change.
     BUYs subtract amount_usdso, SELLs add it. Only counts status=success."""
