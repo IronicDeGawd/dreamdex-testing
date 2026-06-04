@@ -303,9 +303,48 @@
                             Awaiting first orchestrated decision…
                         </div>
                     </div>
+
                 </div>
             </section>
         </div>
+
+        <!-- Burst Loop Status — separate card so the BAL-LOW overlay on Agent
+             Control can't hide it (the burst doesn't care about capital floor). -->
+        <section class="panel" id="burst-card">
+            <div class="panel-header flex justify-between items-center">
+                <span>Burst loops</span>
+                <span class="text-textMuted text-xs normal-case" style="text-transform:none;">two independent producers driving /manual + direct-RPC</span>
+            </div>
+            <div class="panel-body py-3">
+                <!-- REST burst (Flask /manual path) -->
+                <div id="burst-block">
+                    <div class="flex justify-between items-end mb-1">
+                        <span class="text-xs text-textMuted uppercase">REST — /manual</span>
+                        <span id="burst-progress" class="font-mono text-xs text-textMuted">— · — · —</span>
+                    </div>
+                    <div id="burst-status-line" class="font-mono text-sm truncate" style="color: var(--c-muted)">
+                        Awaiting first burst fill…
+                    </div>
+                    <div class="text-xs text-textMuted mt-1">
+                        Hybrid: REST builds tx, RPC broadcasts. Auto-restarts via cron every 5 min. Stable fallback.
+                    </div>
+                </div>
+
+                <!-- Direct-RPC burst (bypasses REST) -->
+                <div id="direct-burst-block" class="pt-3 mt-3 border-t border-border">
+                    <div class="flex justify-between items-end mb-1">
+                        <span class="text-xs text-textMuted uppercase">Direct — RPC only</span>
+                        <span id="direct-burst-progress" class="font-mono text-xs text-textMuted">— · — · —</span>
+                    </div>
+                    <div id="direct-burst-status-line" class="font-mono text-sm truncate" style="color: var(--c-muted)">
+                        Not running.
+                    </div>
+                    <div class="text-xs text-textMuted mt-1">
+                        Builds + signs + broadcasts entirely in-process. ~5× faster than REST when active.
+                    </div>
+                </div>
+            </div>
+        </section>
 
         <!-- Portfolio Card -->
         <section class="panel">
@@ -606,6 +645,14 @@ cd ~ && rm -rf ~/dreamdex-agent</pre>
             microBlock:     document.getElementById('micro-block'),
             microProgress:  document.getElementById('micro-progress'),
             microStatusLine: document.getElementById('micro-status-line'),
+
+            // Burst loop status (read-only)
+            burstBlock:     document.getElementById('burst-block'),
+            burstProgress:  document.getElementById('burst-progress'),
+            burstStatusLine: document.getElementById('burst-status-line'),
+            directBurstBlock: document.getElementById('direct-burst-block'),
+            directBurstProgress: document.getElementById('direct-burst-progress'),
+            directBurstStatusLine: document.getElementById('direct-burst-status-line'),
             
             // Manual Trade
             tradePair: document.getElementById('trade-pair'),
@@ -906,6 +953,103 @@ cd ~ && rm -rf ~/dreamdex-agent</pre>
                 /* silent — sub-agent optional */
             } finally {
                 setTimeout(pollMicro, 5000);
+            }
+        };
+
+        const pollDirectBurst = async () => {
+            try {
+                const res = await fetch(`${BASE_URL}/direct_burst`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                if (!data.available) {
+                    if (el.directBurstStatusLine) {
+                        el.directBurstStatusLine.textContent = data.reason || 'Not running.';
+                        el.directBurstStatusLine.style.color = 'var(--c-muted)';
+                    }
+                    if (el.directBurstProgress) el.directBurstProgress.textContent = '— · — · —';
+                    return;
+                }
+                const running = !!data.running;
+                const txps = data.tx_per_sec != null ? data.tx_per_sec.toFixed(2) : '—';
+                const sent = data.sent != null ? data.sent : 0;
+                const cyc = data.cycles_done != null ? data.cycles_done : 0;
+                const total = data.cycles_total != null ? data.cycles_total : '∞';
+                const leg = data.leg_size != null ? `$${(+data.leg_size).toFixed(2)}` : '—';
+                const ago = data.last_action_ago_s;
+                let agoStr;
+                if (ago == null) agoStr = '—';
+                else if (ago < 60) agoStr = `${Math.round(ago)}s`;
+                else if (ago < 3600) agoStr = `${Math.round(ago/60)}m`;
+                else agoStr = `${(ago/3600).toFixed(1)}h`;
+
+                if (el.directBurstProgress) {
+                    el.directBurstProgress.textContent =
+                        `${txps} tx/s · ${leg} leg · cycle ${cyc}/${total}`;
+                }
+                if (el.directBurstStatusLine) {
+                    const icon = running ? '🟢' : '⏸';
+                    const stateText = running ? 'RUNNING' : 'IDLE';
+                    const stateColor = running ? 'text-success' : 'text-warning';
+                    const errs = data.send_errs || 0;
+                    el.directBurstStatusLine.innerHTML =
+                        `${icon} <span class="${stateColor} font-bold">${stateText}</span> ` +
+                        `<span class="text-textMuted">last action</span> ${agoStr} ago · ` +
+                        `<span class="text-textMuted">sent</span> ${sent}` +
+                        (errs > 0 ? ` <span class="text-warning">· errs ${errs}</span>` : '');
+                    el.directBurstStatusLine.style.color = '';
+                }
+            } catch (err) {
+                /* silent — direct burst is optional */
+            } finally {
+                setTimeout(pollDirectBurst, 5000);
+            }
+        };
+
+        const pollBurst = async () => {
+            try {
+                const res = await fetch(`${BASE_URL}/burst`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                if (el.burstBlock) el.burstBlock.classList.remove('hidden');
+
+                const running = !!data.running;
+                const leg = data.leg_size != null ? `$${data.leg_size.toFixed(2)}` : '—';
+                const lastAgo = data.last_fill_ago_s;
+                let ago;
+                if (lastAgo == null) ago = '—';
+                else if (lastAgo < 60) ago = `${Math.round(lastAgo)}s`;
+                else if (lastAgo < 3600) ago = `${Math.round(lastAgo/60)}m`;
+                else ago = `${(lastAgo/3600).toFixed(1)}h`;
+
+                // Right side: fill rate · leg · total
+                if (el.burstProgress) {
+                    const fpm = (data.fills_5m || 0) / 5;
+                    el.burstProgress.textContent =
+                        `${fpm.toFixed(1)}/min · ${leg} leg · ${data.fills_total || 0} total`;
+                }
+
+                // Status line
+                if (el.burstStatusLine) {
+                    if (data.fills_total === 0) {
+                        el.burstStatusLine.textContent = 'Awaiting first burst fill…';
+                        el.burstStatusLine.style.color = 'var(--c-muted)';
+                    } else {
+                        const icon = running ? '🟢' : '⏸';
+                        const stateText = running ? 'RUNNING' : 'IDLE';
+                        const stateColor = running ? 'text-success' : 'text-warning';
+                        const volH = data.volume_1h != null ? `$${Math.round(data.volume_1h).toLocaleString()}` : '—';
+                        el.burstStatusLine.innerHTML =
+                            `${icon} <span class="${stateColor} font-bold">${stateText}</span> ` +
+                            `<span class="text-textMuted">last fill</span> ${ago} ago · ` +
+                            `<span class="text-textMuted">1h vol</span> ${volH} · ` +
+                            `<span class="text-textMuted">${data.fills_1h || 0} fills</span>`;
+                        el.burstStatusLine.style.color = '';
+                    }
+                }
+            } catch (err) {
+                /* silent — burst is optional surface */
+            } finally {
+                setTimeout(pollBurst, 5000);
             }
         };
 
@@ -1390,6 +1534,8 @@ cd ~ && rm -rf ~/dreamdex-agent</pre>
             pollLeaderboard();
             pollMode();
             pollMicro();
+            pollBurst();
+            pollDirectBurst();
         };
 
         window.onload = init;

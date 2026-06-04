@@ -85,6 +85,86 @@ def leaderboard():
     """My position only"""
     return jsonify(_lb.get_my_stats())
 
+@app.route("/direct_burst")
+def direct_burst_status():
+    """Direct-RPC burst status — read from stats file written by direct_burst.py.
+    Returns {} with `available: false` if no stats file exists yet."""
+    import json
+    import time as _time
+    path = os.environ.get("BURST_STATS_PATH", "/tmp/direct_burst_stats.json")
+    try:
+        with open(path, "r") as fh:
+            stats = json.load(fh)
+        now = _time.time()
+        last_age = now - stats.get("last_action_ts", 0)
+        stats["last_action_ago_s"] = round(last_age, 1)
+        stats["running"] = last_age < 30  # alive if stats updated < 30s ago
+        stats["available"] = True
+        return jsonify(stats)
+    except FileNotFoundError:
+        return jsonify({"available": False, "running": False,
+                        "reason": "no stats file yet"})
+    except Exception as e:
+        return jsonify({"available": False, "running": False,
+                        "error": str(e)[:120]})
+
+
+@app.route("/burst")
+def burst_status():
+    """Burst loop status — derived from manual-mode trades in DB.
+    Read-only. No auth required (status, not control)."""
+    import sqlite3
+    import time as _time
+    from monitor.db import _DB_PATH
+    now = _time.time()
+    out = {
+        "running": False,
+        "last_fill_ago_s": None,
+        "fills_1m": 0,
+        "fills_5m": 0,
+        "fills_1h": 0,
+        "fills_total": 0,
+        "leg_size": None,
+        "volume_1h": 0.0,
+    }
+    try:
+        with sqlite3.connect(_DB_PATH, timeout=5.0) as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT COUNT(*), MAX(ts) FROM trades "
+                "WHERE mode = 'manual' AND status = 'success' AND ts > ?",
+                (now - 60,),
+            )
+            r1 = c.fetchone()
+            out["fills_1m"] = r1[0]
+            last_ts = r1[1]
+            for window_s, key in ((300, "fills_5m"), (3600, "fills_1h")):
+                c.execute(
+                    "SELECT COUNT(*) FROM trades "
+                    "WHERE mode = 'manual' AND status = 'success' AND ts > ?",
+                    (now - window_s,),
+                )
+                out[key] = c.fetchone()[0]
+            c.execute(
+                "SELECT COUNT(*) FROM trades WHERE mode = 'manual' AND status = 'success'"
+            )
+            out["fills_total"] = c.fetchone()[0]
+            c.execute(
+                "SELECT amount_usdso FROM trades "
+                "WHERE mode = 'manual' AND status = 'success' "
+                "ORDER BY ts DESC LIMIT 20"
+            )
+            recent = [r[0] for r in c.fetchall() if r[0] is not None]
+            if recent:
+                out["leg_size"] = round(sum(recent) / len(recent), 2)
+                out["volume_1h"] = round(out["fills_1h"] * out["leg_size"], 2)
+        if last_ts:
+            out["last_fill_ago_s"] = round(now - last_ts, 1)
+            out["running"] = out["last_fill_ago_s"] < 60
+    except Exception as e:
+        out["error"] = str(e)[:120]
+    return jsonify(out)
+
 @app.route("/manual", methods=["POST"])
 def manual_trade():
     """ESP32 button triggers a manual trade. AUTHED."""
@@ -95,7 +175,8 @@ def manual_trade():
         pair       = data["pair"],
         side       = data["side"],
         amount_usdso = float(data["amount_usdso"]),
-        prices     = _prices.latest()
+        prices     = _prices.latest(),
+        skip_sim   = bool(data.get("skip_sim", False)),
     )
     return jsonify(result)
 
