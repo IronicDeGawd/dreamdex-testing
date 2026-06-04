@@ -274,6 +274,7 @@ class DreamDEX:
         order_type: str = "market",
         limit_price: float | None = None,
         funding: str = "wallet",
+        skip_sim: bool = False,
     ) -> dict:
         """
         Prepare + sign + broadcast an order.
@@ -424,10 +425,13 @@ class DreamDEX:
             # "Simulate first via eth_call. If success == false, do not broadcast."
             # Covers expireNs=0, self-trade, PostOnly cross, FOK underfill,
             # IOC no-match — all the silent-reject modes — without paying gas.
-            sim_ok, sim_id, sim_raw = self.simulate_order_tx(resp)
-            print(f"[DreamDEX] eth_call sim: success={sim_ok} orderId={sim_id} raw={sim_raw[:80]}")
-            if not sim_ok:
-                return {"status": "would_revert", "sim_raw": sim_raw[:200]}
+            if skip_sim:
+                print("[DreamDEX] sim skipped (skip_sim=True) — broadcasting direct")
+            else:
+                sim_ok, sim_id, sim_raw = self.simulate_order_tx(resp)
+                print(f"[DreamDEX] eth_call sim: success={sim_ok} orderId={sim_id} raw={sim_raw[:80]}")
+                if not sim_ok:
+                    return {"status": "would_revert", "sim_raw": sim_raw[:200]}
 
             # C4 + R1: capture pre-trade balances. Native pools deliver base to the
             # EOA wallet, not the vault — so for those we must read both vault and
