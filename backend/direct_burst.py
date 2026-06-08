@@ -13,7 +13,7 @@ ENV:
   BURST_DELAY_MS         — between submissions (default 600)
   BURST_SLIPPAGE_TICKS   — ticks past book top to set limit (default 10)
 """
-import os, sys, time, json
+import os, sys, time, json, queue, threading, atexit
 sys.path.insert(0, "/app")
 
 from web3 import Web3
@@ -21,7 +21,9 @@ from eth_account import Account
 from config import MARKETS, SOMNIA_RPC, CHAIN_ID
 # Trigger SDK to populate MARKETS with tick/lot/min from /v0/markets
 from trading.dreamdex import DreamDEX
+from monitor import db
 _sdk = DreamDEX()  # populates MARKETS in place
+db.init()          # ensure trades table exists before we log to it
 
 PAIR        = os.environ.get("BURST_PAIR", "SOMI:USDso")
 USDSO_LEG   = float(os.environ.get("BURST_USDSO", "15.0"))
@@ -194,7 +196,64 @@ def get_mid():
     return 0.0
 
 
+# ── Async tx logger ────────────────────────────────────────────────────────
+# Every broadcast tx is logged to agent.db so nothing has to be scraped
+# on-chain later (round-1 gap: ~43k burst txs never hit the DB). Logging runs
+# on a background thread draining an in-process queue in batches, so the burst
+# hot path never blocks on a DB write. Worst-case loss on a hard kill is the
+# sub-second of rows still in the queue — and those are still on-chain anyway.
+_LOG_Q: "queue.Queue" = queue.Queue(maxsize=100_000)
+_LOG_SENTINEL = object()
+
+
+def _log_worker():
+    batch = []
+    while True:
+        try:
+            item = _LOG_Q.get(timeout=1.0)
+        except queue.Empty:
+            db.record_trades_batch(batch, mode="volume", agent_name="burst"); batch = []
+            continue
+        if item is _LOG_SENTINEL:
+            db.record_trades_batch(batch, mode="volume", agent_name="burst")
+            return
+        batch.append(item)
+        if len(batch) >= 50:
+            db.record_trades_batch(batch, mode="volume", agent_name="burst"); batch = []
+
+
+def log_tx(side, qty_raw, price_raw, tx_hash, status="sent"):
+    """Enqueue one broadcast tx for the background writer. Non-blocking; drops
+    silently if the queue is somehow full rather than ever stalling the burst."""
+    qty_h = qty_raw / (10 ** base_dec)
+    px_h  = price_raw / (10 ** quote_dec)
+    try:
+        _LOG_Q.put_nowait({
+            "action": "buy" if side == "BUY" else "sell",
+            "pair": PAIR,
+            "qty": qty_h,
+            "amount_usdso": qty_h * px_h,
+            "mid": px_h,
+            "reason": "direct_burst",
+            "confidence": 0,
+            "result": {"status": status, "tx_hash": tx_hash},
+        })
+    except queue.Full:
+        pass
+
+
 def main():
+    # Start the async tx-logger thread; flush on exit.
+    _log_thread = threading.Thread(target=_log_worker, daemon=True)
+    _log_thread.start()
+    def _flush_logs():
+        try:
+            _LOG_Q.put_nowait(_LOG_SENTINEL)
+            _log_thread.join(timeout=5.0)
+        except Exception:
+            pass
+    atexit.register(_flush_logs)
+
     params = fetch_params()
     tick   = params["tick"]
     minQty = params["minQty"]
@@ -313,6 +372,7 @@ def main():
                         s = w3.eth.account.sign_transaction(tx, KEY)
                         h = w3.eth.send_raw_transaction(s.raw_transaction)
                         sent_hashes.append(("BUY", i, h.hex()))
+                        log_tx("BUY", qty_raw, buy_price_raw, h.hex())
                         print(f"[c{i}] BUY  n{nonce} @ {buy_price_raw/10**quote_dec:.5f} {h.hex()[:14]}")
                         nonce += 1
                         # Local accounting: pay quote, get base
@@ -358,6 +418,7 @@ def main():
                         s = w3.eth.account.sign_transaction(tx, KEY)
                         h = w3.eth.send_raw_transaction(s.raw_transaction)
                         sent_hashes.append(("SELL", i, h.hex()))
+                        log_tx("SELL", qty_raw, sell_price_raw, h.hex())
                         print(f"[c{i}] SELL n{nonce} @ {sell_price_raw/10**quote_dec:.5f} {h.hex()[:14]}")
                         nonce += 1
                         # Local accounting: send base, get quote
@@ -412,8 +473,10 @@ def main():
             r = w3.eth.get_transaction_receipt(h)
             if r.status == 1:
                 confirmed += 1
+                db.set_status_by_hash(h, "confirmed")
             else:
                 reverted += 1
+                db.set_status_by_hash(h, "reverted")
         except Exception:
             pending += 1
     elapsed = time.time() - t0
