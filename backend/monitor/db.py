@@ -122,6 +122,57 @@ def record_trade(entry: dict, mode: str = "grind", agent_name: str = "main") -> 
         print(f"[db] record_trade failed: {e}")
 
 
+def record_trades_batch(entries: list, mode: str = "grind", agent_name: str = "main") -> int:
+    """Insert many trade entries in a single transaction. Used by the burst's
+    async logger thread so the hot path never blocks on per-row writes.
+    Returns the number of rows written."""
+    if not entries:
+        return 0
+    rows = []
+    for entry in entries:
+        res = entry.get("result", {}) or {}
+        rows.append((
+            time.time(),
+            entry.get("action", ""),
+            entry.get("pair"),
+            float(entry.get("qty") or 0),
+            float(entry.get("amount_usdso") or 0),
+            float(entry.get("mid") or 0),
+            res.get("status", ""),
+            res.get("tx_hash"),
+            res.get("vault_delta"),
+            entry.get("reason"),
+            int(entry.get("confidence") or 0),
+            mode,
+            agent_name,
+        ))
+    try:
+        with _LOCK, _conn() as c:
+            c.executemany(
+                """INSERT INTO trades
+                   (ts, action, pair, qty, amount_usdso, price, status, tx_hash,
+                    vault_delta, reason, confidence, mode, agent_name)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                rows,
+            )
+        return len(rows)
+    except Exception as e:
+        print(f"[db] record_trades_batch failed: {e}")
+        return 0
+
+
+def set_status_by_hash(tx_hash: str, status: str) -> None:
+    """Reconcile a previously-logged tx's status (sent → confirmed/reverted)
+    once its receipt is known. Used by the burst's end-of-run receipt sweep."""
+    if not tx_hash:
+        return
+    try:
+        with _LOCK, _conn() as c:
+            c.execute("UPDATE trades SET status=? WHERE tx_hash=?", (status, tx_hash))
+    except Exception as e:
+        print(f"[db] set_status_by_hash failed: {e}")
+
+
 def record_tick(prices: dict, momentum: dict) -> None:
     """Snapshot all pair prices + 30-min momentum once per agent tick.
     Skipped silently if prices is empty (boot)."""
