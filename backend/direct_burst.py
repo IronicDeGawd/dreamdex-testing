@@ -358,26 +358,30 @@ def main():
         # ===== BUY leg: price = top_ask + SLIP_TICKS to cross the book =====
         if top_ask > 0:
             buy_price_raw = top_ask + (SLIP_TICKS * tick)
-            # Quote amount we'd pay: qty (base raw) * price (quote raw) / base_unit
-            buy_cost_raw = qty_raw * buy_price_raw // (10**base_dec)
-            if usdso_bal < buy_cost_raw:
+            # Elastic sizing: buy the largest lot-aligned qty our USDso can
+            # afford, capped at the target leg. Prevents the fixed-leg deadlock
+            # where one-sided inventory drift leaves neither leg fundable.
+            afford_qty = (usdso_bal * (10**base_dec)) // buy_price_raw if buy_price_raw else 0
+            buy_qty = min(qty_raw, (afford_qty // lot) * lot)
+            buy_cost_raw = buy_qty * buy_price_raw // (10**base_dec)
+            if buy_qty < minQty:
                 skipped += 1
-                print(f"[c{i}] BUY  skip (USDso {usdso_bal/10**quote_dec:.2f} < {buy_cost_raw/10**quote_dec:.2f})")
+                print(f"[c{i}] BUY  skip (USDso {usdso_bal/10**quote_dec:.2f} buys < minQty)")
             else:
-                ok = True if SKIP_SIM else sim_call(True, buy_price_raw, qty_raw, expire_ns)[0]
+                ok = True if SKIP_SIM else sim_call(True, buy_price_raw, buy_qty, expire_ns)[0]
                 if ok:
                     try:
-                        tx = build_burst_tx(True, buy_price_raw, qty_raw, value_native=0,
+                        tx = build_burst_tx(True, buy_price_raw, buy_qty, value_native=0,
                                             nonce=nonce, expire_ns=expire_ns)
                         s = w3.eth.account.sign_transaction(tx, KEY)
                         h = w3.eth.send_raw_transaction(s.raw_transaction)
                         sent_hashes.append(("BUY", i, h.hex()))
-                        log_tx("BUY", qty_raw, buy_price_raw, h.hex())
-                        print(f"[c{i}] BUY  n{nonce} @ {buy_price_raw/10**quote_dec:.5f} {h.hex()[:14]}")
+                        log_tx("BUY", buy_qty, buy_price_raw, h.hex())
+                        print(f"[c{i}] BUY  n{nonce} {buy_qty/10**base_dec:.2f} @ {buy_price_raw/10**quote_dec:.5f} {h.hex()[:14]}")
                         nonce += 1
                         # Local accounting: pay quote, get base
                         usdso_bal -= buy_cost_raw
-                        base_usable += qty_raw
+                        base_usable += buy_qty
                         consec_fail = 0
                     except Exception as e:
                         send_errs += 1
@@ -399,32 +403,35 @@ def main():
         # Reuse top_bid from same cycle's book fetch — no second RPC read.
         if top_bid > 0:
             sell_price_raw = max(top_bid - (SLIP_TICKS * tick), tick)
-            # For native-base pools, SELL sends msg.value = qty_raw SOMI.
+            # Elastic sizing: sell the largest lot-aligned qty we actually hold,
+            # capped at the target leg. Clears inventory drift so we never lock up.
+            # For native-base pools, SELL sends msg.value = sell_qty SOMI.
             # For ERC20-base pools, base is pulled via allowance (need wallet
             # balance) and gas is paid separately in native SOMI.
-            need_native = qty_raw if is_native_base else 0
-            if base_usable < qty_raw:
+            sell_qty = min(qty_raw, (base_usable // lot) * lot)
+            need_native = sell_qty if is_native_base else 0
+            if sell_qty < minQty:
                 skipped += 1
-                print(f"[c{i}] SELL skip (base {base_usable/10**base_dec:.4f} < {qty_raw/10**base_dec:.4f})")
+                print(f"[c{i}] SELL skip (base {base_usable/10**base_dec:.4f} < minQty)")
             elif not is_native_base and gas_native < SOMI_GAS_RESERVE_RAW:
                 skipped += 1
                 print(f"[c{i}] SELL skip (gas SOMI {gas_native/1e18:.3f} < reserve {SOMI_GAS_RESERVE})")
             else:
-                ok = True if SKIP_SIM else sim_call(False, sell_price_raw, qty_raw, expire_ns)[0]
+                ok = True if SKIP_SIM else sim_call(False, sell_price_raw, sell_qty, expire_ns)[0]
                 if ok:
                     try:
-                        tx = build_burst_tx(False, sell_price_raw, qty_raw, value_native=need_native,
+                        tx = build_burst_tx(False, sell_price_raw, sell_qty, value_native=need_native,
                                             nonce=nonce, expire_ns=expire_ns)
                         s = w3.eth.account.sign_transaction(tx, KEY)
                         h = w3.eth.send_raw_transaction(s.raw_transaction)
                         sent_hashes.append(("SELL", i, h.hex()))
-                        log_tx("SELL", qty_raw, sell_price_raw, h.hex())
-                        print(f"[c{i}] SELL n{nonce} @ {sell_price_raw/10**quote_dec:.5f} {h.hex()[:14]}")
+                        log_tx("SELL", sell_qty, sell_price_raw, h.hex())
+                        print(f"[c{i}] SELL n{nonce} {sell_qty/10**base_dec:.2f} @ {sell_price_raw/10**quote_dec:.5f} {h.hex()[:14]}")
                         nonce += 1
                         # Local accounting: send base, get quote
-                        sell_proceeds_raw = qty_raw * sell_price_raw // (10**base_dec)
+                        sell_proceeds_raw = sell_qty * sell_price_raw // (10**base_dec)
                         usdso_bal += sell_proceeds_raw
-                        base_usable -= qty_raw
+                        base_usable -= sell_qty
                         consec_fail = 0
                     except Exception as e:
                         send_errs += 1
