@@ -21,10 +21,12 @@ from config import SOMNIA_RPC, CHAIN_ID, MY_ADDRESS, PRIVATE_KEY as _CONFIG_KEY
 
 
 class SomniaWallet:
-    def __init__(self):
-        self.address     = MY_ADDRESS
+    def __init__(self, private_key: str | None = None, address: str | None = None):
+        # Optional overrides let a second wallet (e.g. the profit-lane wallet)
+        # run alongside the default config wallet without touching globals.
+        self.address     = address or MY_ADDRESS
         self.chain_id    = CHAIN_ID
-        self.private_key = _CONFIG_KEY  # set via TESTNET_PRIVATE_KEY or MAINNET_PRIVATE_KEY env var
+        self.private_key = private_key or _CONFIG_KEY  # set via TESTNET/MAINNET_PRIVATE_KEY env var
         self.w3          = Web3(Web3.HTTPProvider(SOMNIA_RPC))
         # H3 fix: local nonce counter. Prevents multi-tx flows (approve → deposit → order)
         # from racing on `eth_getTransactionCount("pending")` when the RPC's pending pool

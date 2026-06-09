@@ -33,9 +33,9 @@ from trading.wallet import SomniaWallet
 
 
 class DreamDEX:
-    def __init__(self):
+    def __init__(self, private_key: str | None = None, address: str | None = None):
         self.base_url = DREAMDEX_HTTP
-        self.wallet   = SomniaWallet()
+        self.wallet   = SomniaWallet(private_key=private_key, address=address)
         self._token: str | None  = None
         self._token_expiry: float = 0.0
         self._session = requests.Session()
