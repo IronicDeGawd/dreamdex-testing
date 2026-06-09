@@ -7,7 +7,7 @@
 set -u
 exec docker exec \
     -e BURST_PAIR="${BURST_PAIR:-USDC.e:USDso}" \
-    -e BURST_USDSO="${BURST_USDSO:-40}" \
+    -e BURST_USDSO="${BURST_USDSO:-45}" \
     -e BURST_CYCLES="${BURST_CYCLES:-99999}" \
     -e BURST_DELAY_MS="${BURST_DELAY_MS:-0}" \
     -e BURST_SLIPPAGE_TICKS="${BURST_SLIPPAGE_TICKS:-3}" \
