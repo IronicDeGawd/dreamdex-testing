@@ -49,21 +49,28 @@ class Strategist:
                 project=config.GEMINI_PROJECT or None,
                 location=config.GEMINI_LOCATION,
             )
-            self._ping()
         except Exception as e:
+            # Only a hard client-construction/import failure disables the strategist.
             self._init_error = str(e)
             self._client = None
             print(f"[strategist] init failed, using defaults: {e}", flush=True)
+            return
+        # Informational ping only — a transient error (e.g. 429) must NOT disable
+        # the strategist for the whole run; decide() retries each cycle and falls
+        # back safely on its own.
+        self._ping()
 
     def _ping(self):
-        """One cheap call so deploy logs confirm ADC works (or fail loud)."""
-        resp = self._client.models.generate_content(
-            model=config.GEMINI_MODEL, contents="reply with: ok",
-            config={"temperature": 0.0},
-        )
-        print(f"[strategist] Gemini reachable via {'Vertex/ADC' if config.GEMINI_USE_VERTEX else 'API'} "
-              f"(model={config.GEMINI_MODEL}, project={config.GEMINI_PROJECT or '-'}): {(resp.text or '').strip()[:20]}",
-              flush=True)
+        try:
+            resp = self._client.models.generate_content(
+                model=config.GEMINI_MODEL, contents="reply with: ok",
+                config={"temperature": 0.0},
+            )
+            print(f"[strategist] Gemini reachable via {'Vertex/ADC' if config.GEMINI_USE_VERTEX else 'API'} "
+                  f"(model={config.GEMINI_MODEL}, project={config.GEMINI_PROJECT or '-'}): {(resp.text or '').strip()[:20]}",
+                  flush=True)
+        except Exception as e:
+            print(f"[strategist] startup ping failed (will still retry each cycle): {e}", flush=True)
 
     @property
     def available(self) -> bool:
