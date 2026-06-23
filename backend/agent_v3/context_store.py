@@ -64,6 +64,41 @@ def init() -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_qc_ts ON quote_context(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_qc_pair_ts ON quote_context(pair, ts)")
+        # Persisted inventory so a restart resumes the real position (not flat).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS inventory_state ("
+            "pair TEXT PRIMARY KEY, base REAL, avg_cost REAL, updated REAL)"
+        )
+        conn.execute("CREATE TABLE IF NOT EXISTS agent_state (k TEXT PRIMARY KEY, v REAL)")
+
+
+def save_inventory(positions: dict, realized_pnl: float) -> None:
+    try:
+        with _connect() as conn:
+            conn.execute("DELETE FROM inventory_state")
+            for pair, pos in positions.items():
+                conn.execute(
+                    "INSERT INTO inventory_state(pair, base, avg_cost, updated) VALUES (?,?,?,?)",
+                    (pair, pos.get("base", 0.0), pos.get("avg_cost", 0.0), time.time()),
+                )
+            conn.execute("INSERT OR REPLACE INTO agent_state(k, v) VALUES ('realized_pnl', ?)", (realized_pnl,))
+    except Exception as e:
+        print(f"[context_store] save_inventory failed: {e}", flush=True)
+
+
+def load_inventory() -> tuple[dict, float]:
+    positions: dict = {}
+    realized = 0.0
+    try:
+        with _connect() as conn:
+            for r in conn.execute("SELECT pair, base, avg_cost FROM inventory_state").fetchall():
+                positions[r["pair"]] = {"base": r["base"] or 0.0, "avg_cost": r["avg_cost"] or 0.0}
+            row = conn.execute("SELECT v FROM agent_state WHERE k='realized_pnl'").fetchone()
+            if row and row["v"] is not None:
+                realized = float(row["v"])
+    except Exception as e:
+        print(f"[context_store] load_inventory failed: {e}", flush=True)
+    return positions, realized
 
 
 def log_event(row: dict) -> None:

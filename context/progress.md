@@ -47,10 +47,16 @@
 - ⚠️ **WETH/WBTC PostOnly buys reverted** on testnet ($1 leg → likely sub-minQuantity or PostOnly-cross). SOMI path clean. Investigate min sizes per pair before relying on WETH/WBTC.
 - 🐛 **FIXED — order stacking + missed partial:** re-quote left a stale sell resting (got 2 stacked; one partial-filled 3/9.91) because cancel-before-replace wasn't airtight and the 50%-notional threshold missed the partial. Reworked to id-based fill detection (track our order, read `remaining`) + always cancel our order before re-placing.
 
+## Min order sizes (live mainnet /v0/markets, 2026-06-24)
+- WETH:USDso: minQty 0.001, lot 0.0001, tick 0.01 → min order ≈ **$1.66**
+- WBTC:USDso: minQty 0.0001, lot 1e-5, tick 0.1 → min order ≈ **$6.23**
+- SOMI:USDso: minQty 1.0, lot 0.01, tick 0.0001 → min order ≈ **$0.10**
+- Our $12 `MAKER_LEG_USD` clears all three; `_round_lot` floors at minQty. No config change. NOTE: with strong inventory skew the WBTC leg could shrink below $6.23 → floored to minQty (fine). Testnet $1 WETH/WBTC reverts were sub-min / occasional PostOnly-cross — the loop logs the revert and retries; not blocking.
+
 ## Known Issues — R3 profit agent
-- **Execution path:** SOMI cycle validated on testnet; id-based fill/no-stack rework is committed + compiles but NOT yet re-validated live (testnet wallet ran out of USDso — ~1.2 left + holding ~7 SOMI). Re-validate after topping up testnet USDso. Validate WETH/WBTC min sizes before mainnet (their $1 PostOnly buys reverted — likely sub-minQuantity).
-- **🐛 Inventory resets on restart (MUST FIX before mainnet):** `Inventory` is in-memory, so after a restart the bot ignores base it still holds on-chain — it thinks it is flat and buys more instead of selling. Fix: persist positions+avg_cost (e.g. a SQLite state table) and reload on startup; or reconcile base from on-chain balance at boot. `run()`'s "resume if base>0" check reads the in-memory base (always 0 on fresh start), so it never triggers.
-- **Testnet wallet state:** low USDso + holding ~7 SOMI + in-memory/on-chain desync. Liquidate SOMI→USDso or top up before the next testnet round.
+- **Execution path:** SOMI cycle validated on testnet; id-based fill/no-stack rework committed + compiles, NOT yet re-validated live (testnet wallet out of USDso). Re-validate after topping up testnet USDso (testnet gas = STT, quote = USDso; "SOMI" pair on testnet is native STT).
+- **✅ FIXED — inventory persistence:** positions + avg_cost + realized PnL now persist to SQLite (`inventory_state`/`agent_state` in agent.db) on every fill and reload on startup, so a restart resumes the real position instead of starting flat. Runner also logs any on-chain vs persisted base mismatch for ERC-20 base pairs. Verified across a simulated restart.
+- **Testnet wallet state:** low USDso + holding ~7 STT (from validation). Liquidate or top up before the next testnet round.
 - **Native SOMI pair making:** SOMI base is native; quote-side (USDso) delta still detects fills, but base inventory tracking on the native pool is less clean — validate or keep SOMI pair gas-only at first.
 - **Strategist needs server ADC:** Gemini 2.5 Pro via Vertex requires `GOOGLE_CLOUD_PROJECT` + `gcloud auth application-default login` on the server. Falls back to safe deterministic defaults if absent.
 - **Two-sided simultaneous quoting deferred:** v1 uses the proven alternating no-bleed cycle (one resting side at a time — still earns yield). Simultaneous both-sides quoting for extra yield is a future enhancement.
