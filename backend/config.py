@@ -62,17 +62,18 @@ STRATEGIST_ENABLED    = os.environ.get("STRATEGIST_ENABLED", "true").lower() == 
 # Scoring is Effective Volume = Raw Volume × (1 + PnL%); a wipe = 0. Profit first.
 STARTING_CAPITAL   = 150.0   # USDso, fixed by rules — no top-ups ever
 RESERVE_USDSO      = float(os.environ.get("RESERVE_USDSO", 20.0))  # held untouched (gas + PnL cushion)
-# Contest-eligible pairs (no stablecoin pairs). USDC.e is intentionally excluded.
-ELIGIBLE_PAIRS     = ["WETH:USDso", "WBTC:USDso", "SOMI:USDso"]
+# Contest-eligible pairs we actually quote. SOMI has the widest (capturable)
+# spread; WBTC second. WETH's ~1.4bps spread isn't worth the adverse selection.
+ELIGIBLE_PAIRS     = ["SOMI:USDso", "WBTC:USDso"]
+# Working-capital allocation per pair (fractions of the non-reserve balance).
+MAKER_PAIR_ALLOC   = {"SOMI:USDso": 0.8, "WBTC:USDso": 0.2}
 
-# Two-sided PostOnly quoting
-MAKER_LEG_USD      = float(os.environ.get("MAKER_LEG_USD", 12.0))   # USDso notional per resting leg
-MAKER_MARGIN_TICKS = int(os.environ.get("MAKER_MARGIN_TICKS", 3))   # SELL ≥ BUY + this → no-bleed
-MAKER_SPREAD_K     = float(os.environ.get("MAKER_SPREAD_K", 1.5))   # spread = max(tick_floor, k×vol)
-MAKER_MAX_INV_USD  = float(os.environ.get("MAKER_MAX_INV_USD", 40.0))  # max base inventory before skew-only
-MAKER_POLL_S       = int(os.environ.get("MAKER_POLL_S", 10))        # fill-poll interval
-MAKER_REQUOTE_S    = int(os.environ.get("MAKER_REQUOTE_S", 1200))   # patience before drift re-quote
-MAKER_DRIFT_TICKS  = int(os.environ.get("MAKER_DRIFT_TICKS", 5))    # touch drift that triggers re-quote
+# Two-sided PostOnly market-making
+MAKER_LEG_USD      = float(os.environ.get("MAKER_LEG_USD", 25.0))   # USDso notional per resting leg
+MAKER_MARGIN_TICKS = int(os.environ.get("MAKER_MARGIN_TICKS", 1))   # SELL ≥ avg_cost + this → no realized loss
+MAKER_MAX_INV_USD  = float(os.environ.get("MAKER_MAX_INV_USD", 40.0))  # base-inventory cap for the top-allocated pair
+MAKER_POLL_S       = int(os.environ.get("MAKER_POLL_S", 8))         # fill-poll / reconcile interval
+MAKER_DRIFT_TICKS  = int(os.environ.get("MAKER_DRIFT_TICKS", 2))    # touch drift that triggers a re-quote
 
 # Gas management (50 SOMI given, no refills — convert own USDso for more)
 GAS_RESERVE_SOMI    = float(os.environ.get("GAS_RESERVE_SOMI", 5.0))   # floor before forced refuel

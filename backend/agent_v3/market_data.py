@@ -4,7 +4,6 @@ Canonical mid is the book mid ((best_bid+best_ask)/2) — reliable and what the
 maker quotes around. Volatility is the stdev of recent mid returns in bps, used
 to widen the spread when the market is moving.
 """
-import math
 import statistics
 from collections import deque
 
@@ -70,19 +69,3 @@ class MarketData:
             return statistics.stdev(rets) * 1e4
         except statistics.StatisticsError:
             return 0.0
-
-    def desired_half_spread_ticks(self, snap: dict) -> int:
-        """How many ticks off mid to quote each side.
-
-        spread target = max(protocol tick floor, k × volatility). Translated to a
-        per-side tick offset around mid, never below the configured margin.
-        """
-        tick = snap.get("tick") or 0.0
-        mid = snap["mid"]
-        if not tick or not mid:
-            return config.MAKER_MARGIN_TICKS
-        # volatility-driven half-spread, expressed in price then ticks
-        vol_frac = (snap["short_vol"] / 1e4) * config.MAKER_SPREAD_K
-        vol_price = mid * vol_frac
-        vol_ticks = int(math.ceil(vol_price / tick)) if tick else 0
-        return max(config.MAKER_MARGIN_TICKS, vol_ticks)
