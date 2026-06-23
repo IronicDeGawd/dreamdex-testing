@@ -35,6 +35,8 @@ class Runner:
         self.dex = DreamDEX()
         self.md = MarketData(self.dex)
         self.inv = Inventory()
+        self.inv.load()           # resume real position across restarts
+        self._reconcile_inventory()
         self.gas = GasManager(self.dex)
         self.strategist = Strategist()
 
@@ -46,6 +48,23 @@ class Runner:
         # cached working-capital reader (avoid hammering RPC from every leg)
         self._cap_val = 0.0
         self._cap_ts = 0.0
+
+    def _reconcile_inventory(self):
+        """Sanity-check persisted base against on-chain balance for ERC-20 base
+        pairs (native bases share the gas token, so skip those). Log-only — we
+        keep the persisted avg_cost since chain balance carries no cost basis."""
+        for pair in config.ELIGIBLE_PAIRS:
+            mkt = config.MARKETS.get(pair, {})
+            if mkt.get("native") or not mkt.get("base"):
+                continue
+            try:
+                onchain = self.dex.wallet.erc20_balance(mkt["base"], int(mkt.get("baseDecimals", 18)))
+            except Exception:
+                continue
+            persisted = self.inv.base(pair)
+            if abs(onchain - persisted) > max(1e-9, 0.02 * max(onchain, persisted)):
+                print(f"[inventory] ⚠️  {pair} on-chain base {onchain} != persisted {persisted} "
+                      f"— review cost basis", flush=True)
 
     # ── shared state accessors ───────────────────────────────────────────
     def params_for(self, pair: str) -> dict:

@@ -5,13 +5,29 @@ track realized PnL per round-trip and defend a fixed USDso reserve that working
 capital may never dip into.
 """
 import config
+from agent_v3 import context_store as ctx
 
 
 class Inventory:
-    def __init__(self):
+    def __init__(self, persist: bool = True):
         # per-pair: base quantity held and volume-weighted average cost (USDso/base)
         self.positions: dict[str, dict] = {}
         self.realized_pnl: float = 0.0
+        self.persist = persist
+
+    def load(self) -> None:
+        """Restore positions + realized PnL from SQLite so a restart resumes the
+        real on-chain position instead of starting flat."""
+        if not self.persist:
+            return
+        self.positions, self.realized_pnl = ctx.load_inventory()
+        if self.positions:
+            print(f"[inventory] restored {len(self.positions)} positions, "
+                  f"realized={self.realized_pnl:.4f}", flush=True)
+
+    def _save(self) -> None:
+        if self.persist:
+            ctx.save_inventory(self.positions, self.realized_pnl)
 
     # ── fills ────────────────────────────────────────────────────────────
     def record_fill(self, pair: str, side: str, px: float, qty: float) -> float:
@@ -30,6 +46,7 @@ class Inventory:
             if pos["base"] == 0.0:
                 pos["avg_cost"] = 0.0
             self.realized_pnl += delta
+        self._save()
         return delta
 
     def base(self, pair: str) -> float:
