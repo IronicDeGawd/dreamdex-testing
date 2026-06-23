@@ -53,10 +53,18 @@
 - SOMI:USDso: minQty 1.0, lot 0.01, tick 0.0001 → min order ≈ **$0.10**
 - Our $12 `MAKER_LEG_USD` clears all three; `_round_lot` floors at minQty. No config change. NOTE: with strong inventory skew the WBTC leg could shrink below $6.23 → floored to minQty (fine). Testnet $1 WETH/WBTC reverts were sub-min / occasional PostOnly-cross — the loop logs the revert and retries; not blocking.
 
+## 🌟 ROOT CAUSE + FIX — native-pool ops need ≥5M gas LIMIT (cancel too)
+- Sell-cancels on the SOMI (native) pool were **reverting silently** (tx status 0) while `cancel_order` returned a false "cancelled" → orders stuck on the book → apparent "stacking" (saw 3–4 concurrent). Diagnosed: re-cancelling the same resting order with `min_gas=5_000_000` → **status 1, cleared** (gasUsed only 167k). So it's the native-payout `gasleft()` guard (InsufficientGasForPayout), same as native buys — the contract needs a high gas LIMIT even though usage is tiny. ERC-20-payout cancels (buy-side, USDso) work at 3M; native-payout cancels (sell-side SOMI) need ≥5M.
+- **Fix:** `cancel_order` now uses the 5M floor for native pools AND verifies the receipt (reports "revert" instead of fake "cancelled"). Maker also passes the 5M floor on native-pool placements. Maker reworked to cancel-all-before-place + balance-delta fill detection (captures partials, ignores gas).
+
+## ✅ Testnet validation PASSED (2026-06-24)
+- **No stacking:** max concurrent orders/pair = **1**; **0 resting after clean shutdown**.
+- **Profitable no-bleed round-trips on SOMI AND WETH** (e.g. buy 0.1009 → sell 0.101 = +0.000495 USDso; WETH 0.001 filled).
+- Fill detection (full + partial), inventory persistence across restart, multi-pair concurrency — all confirmed.
+
 ## Known Issues — R3 profit agent
-- **Execution path:** SOMI cycle validated on testnet; id-based fill/no-stack rework committed + compiles, NOT yet re-validated live (testnet wallet out of USDso). Re-validate after topping up testnet USDso (testnet gas = STT, quote = USDso; "SOMI" pair on testnet is native STT).
-- **✅ FIXED — inventory persistence:** positions + avg_cost + realized PnL now persist to SQLite (`inventory_state`/`agent_state` in agent.db) on every fill and reload on startup, so a restart resumes the real position instead of starting flat. Runner also logs any on-chain vs persisted base mismatch for ERC-20 base pairs. Verified across a simulated restart.
-- **Testnet wallet state:** low USDso + holding ~7 STT (from validation). Liquidate or top up before the next testnet round.
+- **Pre-mainnet remaining:** (1) wire server ADC for Gemini (`gcloud auth application-default login` + `GOOGLE_CLOUD_PROJECT`); (2) confirm WBTC ($6.23 min) fills with the $12 leg on mainnet (WETH+SOMI validated); (3) edge: a gas-refuel (USDso→SOMI) during a BUY wait could be misread as a buy fill via USDso delta — refuel is rare (only when SOMI<reserve), but isolate it later; (4) fund $150 + register wallet on the new leaderboard before Day 1.
+- **Testnet wallet state:** low USDso + holding some STT from validation. Top up / liquidate before further testnet rounds.
 - **Native SOMI pair making:** SOMI base is native; quote-side (USDso) delta still detects fills, but base inventory tracking on the native pool is less clean — validate or keep SOMI pair gas-only at first.
 - **Strategist needs server ADC:** Gemini 2.5 Pro via Vertex requires `GOOGLE_CLOUD_PROJECT` + `gcloud auth application-default login` on the server. Falls back to safe deterministic defaults if absent.
 - **Two-sided simultaneous quoting deferred:** v1 uses the proven alternating no-bleed cycle (one resting side at a time — still earns yield). Simultaneous both-sides quoting for extra yield is a future enhancement.
