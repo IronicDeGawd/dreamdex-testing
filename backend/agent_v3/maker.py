@@ -50,11 +50,23 @@ class PairMaker:
         decimals = len(dec_str.split(".")[1]) if "." in dec_str else 0
         return round(round(px / tick) * tick, decimals)
 
+    @staticmethod
+    def _dec_places(step: float) -> int:
+        if not step:
+            return 0
+        s = f"{step:.12f}".rstrip("0")
+        return len(s.split(".")[1]) if "." in s else 0
+
     def _round_lot(self, qty: float, lot: float, minq: float) -> float:
+        """Snap qty down to a whole number of lots, formatted to the lot's decimal
+        precision — otherwise float noise (0.00720000001) trips the API's
+        "must be a multiple of lot size" check."""
+        dec = self._dec_places(lot) if lot else 8
         if lot:
-            qty = math.floor(qty / lot) * lot
+            qty = math.floor(round(qty / lot, 6)) * lot   # round-before-floor avoids FP undershoot
+            qty = round(qty, dec)
         if minq and qty < minq:
-            qty = minq
+            qty = round(minq, dec)
         return qty
 
     def _cancel_open(self):
