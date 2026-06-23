@@ -116,6 +116,12 @@ class PairMaker:
             self.stop.wait(config.MAKER_POLL_S)
 
     def _tick(self):
+        if not ctx.control_enabled():            # stopped → flatten to USDso and idle
+            if not self.dry_run:
+                snap = self.md.snapshot(self.pair)
+                if snap:
+                    self._flatten(snap)
+            return
         params = self.params_fn()
         if params.get("pause"):
             if not self.dry_run and (self.orders["buy"] or self.orders["sell"]):
@@ -214,6 +220,27 @@ class PairMaker:
             except Exception as e:
                 print(f"[maker {self.pair}] cancel {side} failed: {e}", flush=True)
             self.orders[side] = None
+
+    def _flatten(self, snap):
+        """Cancel resting orders and IOC-sell base inventory back to USDso.
+        Crosses the spread (accepts a sliver of cost) to guarantee we end flat."""
+        if self.orders["buy"] or self.orders["sell"]:
+            self._cancel_open()
+            self.orders = {"buy": None, "sell": None}
+        base = self.inv.base(self.pair)
+        minq = snap.get("minq") or 0.0
+        if base <= minq:
+            return
+        qty = self._round_lot(base, snap.get("lot"), minq)
+        px = self._snap_px(snap["bid"], snap["tick"])     # sell into the bid (immediate)
+        res = self.dex.place_order(self.pair, "sell", qty, order_type="ioc",
+                                   limit_price=px, funding="wallet", skip_sim=True, gas_min=self.gas_min)
+        if res.get("status") == "success":
+            self._apply_fill("sell", px, qty, snap)
+            print(f"[maker {self.pair}] flattened {qty:g} → USDso", flush=True)
+        else:
+            ctx.log_event(self._ctx_row(snap, event="error", side="sell", status=res.get("status"),
+                                        note=f"flatten: {str(res)[:90]}"))
 
     def _poll_fills(self, snap):
         om = self._open_map()
