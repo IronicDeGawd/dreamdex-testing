@@ -25,7 +25,7 @@ from agent_v3 import context_store as ctx
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 SUMMARY_S = int(os.environ.get("MONITOR_SUMMARY_S", 600))
-PREVIEW_S = int(os.environ.get("MONITOR_PREVIEW_S", 900))   # market-preview cadence
+PREVIEW_S = int(os.environ.get("MONITOR_PREVIEW_S", 7200))  # market-preview cadence (2h)
 POLL_S = int(os.environ.get("MONITOR_POLL_S", 90))
 # Pairs shown in the market preview: the ones we trade (🎯) plus WETH for reference.
 PREVIEW_PAIRS = list(config.ELIGIBLE_PAIRS) + [p for p in ["WETH:USDso"] if p not in config.ELIGIBLE_PAIRS]
@@ -151,7 +151,7 @@ def _fmt(x) -> str:
 
 def summary_text(row, rank, total, bal, opnl, odetail) -> str:
     if not row:
-        return "📊 <b>DreamDEX R3</b>\nOur wallet not on the leaderboard yet."
+        return "📊 <b>DreamDEX V3</b>\nOur wallet not on the leaderboard yet."
     pnl_pct = opnl / config.STARTING_CAPITAL * 100
     emoji = "🟢" if opnl >= 0 else "🔴"
     somi = f"{bal['somi']:.2f}" if bal["somi"] is not None else "?"
@@ -159,7 +159,7 @@ def summary_text(row, rank, total, bal, opnl, odetail) -> str:
     vol = row.get("volumeUsdso", 0)
 
     lines = [
-        "📊 <b>DreamDEX R3</b>",
+        "📊 <b>DreamDEX V3</b>",
         "",
         f"🏆 Rank: <b>{rank}/{total}</b>",
         f"📈 Volume: <b>{vol:,.0f}</b> USDso",
