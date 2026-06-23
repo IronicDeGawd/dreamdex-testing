@@ -9,9 +9,18 @@ services:
     network_mode: host
     env_file:
       - .env
+    environment:
+      # Gemini strategist via Vertex AI using the host's ADC file (mounted below).
+      # google-genai reads creds from this path at runtime — no gcloud CLI needed.
+      # Set GOOGLE_CLOUD_PROJECT + STRATEGIST_ENABLED in .env.
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/adc.json
+      - GOOGLE_GENAI_USE_VERTEXAI=true
+      - GOOGLE_CLOUD_LOCATION=us-central1
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data   # sqlite agent memory; survives container rebuilds
+      # Host ADC credentials (read-only) for the Gemini strategist.
+      - /home/irony/.config/gcloud/application_default_credentials.json:/app/adc.json:ro
     # Liveness via DB freshness: the agent writes a quote_context row every
     # poll cycle, so a stale table means the loop has wedged.
     healthcheck:

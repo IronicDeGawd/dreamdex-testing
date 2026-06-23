@@ -80,11 +80,18 @@ docker compose build && docker compose up -d
 docker exec dreamdex-agent tail -f /app/logs/...   # or: docker logs -f dreamdex-agent
 ```
 Required env (in `backend/.env`, never committed): `DREAMDEX_ENV=mainnet`,
-`MAINNET_PRIVATE_KEY=0x...`, `WALLET_ADDRESS=0xD84f...1E76`. For the strategist:
-`GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, and ADC on the server
-(`gcloud auth application-default login`). Set `STRATEGIST_ENABLED=false` to run pure
-deterministic. Tunables (leg size, margin, reserve, poll/requote timers) are all env-overridable
-— see `config.py`.
+`MAINNET_PRIVATE_KEY=0x...`, `WALLET_ADDRESS=0xD84f...1E76`.
+
+**Gemini strategist (optional):** the agent reads ADC from the credentials file mounted by
+docker-compose (`/home/irony/.config/gcloud/application_default_credentials.json` → `/app/adc.json`)
+via `GOOGLE_APPLICATION_CREDENTIALS` — **no gcloud CLI needed at runtime**. Set
+`GOOGLE_CLOUD_PROJECT` in `.env` (server ADC quota project: `project-8feccae3-bcae-4254-b60` —
+confirm) and `STRATEGIST_ENABLED=true`. GCP prerequisites: the **Vertex AI API must be enabled** on
+that project and the ADC principal needs `roles/aiplatform.user`. The strategist pings Gemini at
+startup and logs success/failure; on any failure it disables itself and the deterministic maker
+runs unaffected. Launch with `STRATEGIST_ENABLED=false` to run pure deterministic first.
+
+Tunables (leg size, margin, reserve, poll/requote timers) are all env-overridable — see `config.py`.
 
 ## Status — NOT live; testnet validation required before mainnet
 Branch `feature/profit-maker-agent`. All modules build and import. The execution path places REAL
