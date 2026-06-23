@@ -26,4 +26,5 @@ EXPOSE 5001
 RUN useradd -m -u 1000 agent && chown -R agent:agent /app
 USER agent
 
-CMD ["python3", "main.py"]
+# Round 3 profit-maker agent (not a web server)
+CMD ["python3", "-m", "agent_v3.runner"]
