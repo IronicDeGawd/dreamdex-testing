@@ -25,7 +25,10 @@ from agent_v3 import context_store as ctx
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 SUMMARY_S = int(os.environ.get("MONITOR_SUMMARY_S", 600))
+PREVIEW_S = int(os.environ.get("MONITOR_PREVIEW_S", 900))   # market-preview cadence
 POLL_S = int(os.environ.get("MONITOR_POLL_S", 90))
+# Pairs shown in the market preview: the ones we trade (🎯) plus WETH for reference.
+PREVIEW_PAIRS = list(config.ELIGIBLE_PAIRS) + [p for p in ["WETH:USDso"] if p not in config.ELIGIBLE_PAIRS]
 GAS_ALERT_SOMI = float(os.environ.get("MONITOR_GAS_ALERT_SOMI", 8.0))
 MILESTONE_USDSO = 500_000          # $25 reward per 500k volume (rules)
 OUR_ADDR = config.LEADERBOARD_ADDRESS.lower()
@@ -56,15 +59,43 @@ def fetch_leaderboard() -> dict | None:
         return None
 
 
-def _fetch_mid(pair: str) -> float | None:
+def _fetch_book(pair: str) -> dict | None:
+    """Top-of-book + a little depth for a pair (public, no auth)."""
     try:
         r = requests.get(f"{config.DREAMDEX_HTTP}/v0/orderbooks",
-                         params={"symbols": pair, "depth": 1}, timeout=12)
+                         params={"symbols": pair, "depth": 3}, timeout=12)
         ob = r.json()["orderbooks"][0]
-        b = float(ob["bids"][0]["price"]); a = float(ob["asks"][0]["price"])
-        return (a + b) / 2
+        bid = float(ob["bids"][0]["price"]); ask = float(ob["asks"][0]["price"])
+        bq = sum(float(x["quantity"]) for x in ob["bids"][:3])
+        aq = sum(float(x["quantity"]) for x in ob["asks"][:3])
+        mid = (bid + ask) / 2
+        return {"bid": bid, "ask": ask, "mid": mid, "bid_qty": bq, "ask_qty": aq,
+                "spread_bps": (ask - bid) / mid * 1e4 if mid else 0.0}
     except Exception:
         return None
+
+
+def _fetch_mid(pair: str) -> float | None:
+    b = _fetch_book(pair)
+    return b["mid"] if b else None
+
+
+def market_preview_text() -> str:
+    lines = ["📈 <b>Market preview</b>", ""]
+    widest = None
+    for p in PREVIEW_PAIRS:
+        b = _fetch_book(p)
+        if not b:
+            continue
+        tag = " 🎯" if p in config.ELIGIBLE_PAIRS else "  (ref)"
+        lines.append(f"<b>{p.split(':')[0]}</b>{tag}")
+        lines.append(f"     {_fmt(b['bid'])} / {_fmt(b['ask'])}  ·  <b>{b['spread_bps']:.1f} bps</b>")
+        lines.append(f"     depth ~{b['bid_qty']:g} bid / {b['ask_qty']:g} ask")
+        if p in config.ELIGIBLE_PAIRS and (widest is None or b["spread_bps"] > widest[1]):
+            widest = (p.split(":")[0], b["spread_bps"])
+    if widest:
+        lines += ["", f"💡 Widest spread we quote: <b>{widest[0]}</b> ({widest[1]:.1f} bps) — most capture per round-trip."]
+    return "\n".join(lines)
 
 
 def our_pnl() -> tuple[float, dict]:
@@ -130,22 +161,24 @@ def summary_text(row, rank, total, bal, opnl, odetail) -> str:
     lines = [
         "📊 <b>DreamDEX R3</b>",
         "",
-        f"🏆 Rank: <b>{rank}/{total}</b> (by volume)",
+        f"🏆 Rank: <b>{rank}/{total}</b>",
         f"📈 Volume: <b>{vol:,.0f}</b> USDso",
         f"🎯 Milestones: {int(vol // MILESTONE_USDSO)} × $25",
         "",
-        f"{emoji} <b>PnL (our calc): {opnl:+.2f} USDso</b> ({pnl_pct:+.1f}%)",
-        f"     ├ realized:   {odetail.get('realized', 0):+.2f}",
-        f"     └ unrealized: {odetail.get('unreal', 0):+.2f}",
+        f"{emoji} PnL: <b>{opnl:+.2f}</b> USDso ({pnl_pct:+.1f}%)",
+        f"   realized: {odetail.get('realized', 0):+.2f}",
+        f"   unrealized: {odetail.get('unreal', 0):+.2f}",
         "",
-        f"🔄 Fills: {row.get('fills', 0)}     🧾 Tx: {row.get('txCount', 0)}",
-        f"👛 USDso: {usdso}     ⛽ SOMI: {somi}",
+        f"🔄 Fills: {row.get('fills', 0)}",
+        f"🧾 Tx: {row.get('txCount', 0)}",
+        f"👛 USDso: {usdso}",
+        f"⛽ SOMI: {somi}",
     ]
     if odetail.get("positions"):
         lines.append("")
         lines.append("📦 Inventory:")
         for p, d in odetail["positions"].items():
-            lines.append(f"     • {p.split(':')[0]}: {d['base']:g} @ {_fmt(d['avg'])} → {_fmt(d['mid'])}")
+            lines.append(f"   {p.split(':')[0]}: {d['base']:g} @ {_fmt(d['avg'])} → {_fmt(d['mid'])}")
     return "\n".join(lines)
 
 
@@ -153,8 +186,9 @@ def run():
     print(f"[monitor] starting — telegram={'on' if (TG_TOKEN and TG_CHAT) else 'OFF (stdout only)'} "
           f"summary={SUMMARY_S}s poll={POLL_S}s wallet={OUR_ADDR}", flush=True)
     state = {"fills": None, "rank": None, "pnl_neg": None, "milestone": None,
-             "gas_low": False, "idle_warned": False}
+             "gas_low": False, "idle_warned": False, "strategy_ts": None}
     last_summary = 0.0
+    last_preview = 0.0
 
     while True:
         lb = fetch_leaderboard()
@@ -207,6 +241,19 @@ def run():
         if now - last_summary >= SUMMARY_S:
             send(summary_text(row, rank, total, bal, opnl, odetail))
             last_summary = now
+
+        # relay each new Gemini strategist rationale (its reasoning, surfaced live)
+        s = ctx.latest_strategy()
+        if s and s.get("note") and s["ts"] != state["strategy_ts"]:
+            pairs = (s.get("pairs") or "").replace(",", ", ")
+            send(f"🧠 <b>Strategist · Gemini 2.5 Pro</b>\n\n{s['note']}"
+                 + (f"\n\n🎯 Focusing: {pairs}" if pairs else ""))
+            state["strategy_ts"] = s["ts"]
+
+        # periodic market preview
+        if now - last_preview >= PREVIEW_S:
+            send(market_preview_text())
+            last_preview = now
 
         time.sleep(POLL_S)
 

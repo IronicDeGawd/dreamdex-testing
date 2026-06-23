@@ -171,6 +171,15 @@ def cum_pnl() -> float:
     return float(r["cum_pnl"]) if r and r["cum_pnl"] is not None else 0.0
 
 
+def latest_strategy() -> dict | None:
+    """Most recent Gemini strategist rationale (for the Telegram feed)."""
+    with _connect() as conn:
+        r = conn.execute(
+            "SELECT ts, note, pair FROM quote_context WHERE event='strategy' ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+    return {"ts": r["ts"], "note": r["note"], "pairs": r["pair"]} if r else None
+
+
 def last_trade_ts() -> float:
     """Unix ts of the most recent fill (for the liveness/DQ guard)."""
     with _connect() as conn:

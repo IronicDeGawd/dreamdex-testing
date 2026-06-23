@@ -103,7 +103,11 @@ class Runner:
                 decision = self.strategist.decide(state)
                 with self._lock:
                     self.decision = decision
-                print(f"[strategist] {decision.get('rationale','')} | active={decision.get('active_pairs')}", flush=True)
+                rationale = decision.get("rationale", "")
+                print(f"[strategist] {rationale} | active={decision.get('active_pairs')}", flush=True)
+                # Log for the Telegram feed (Gemini's reasoning, surfaced by the monitor).
+                ctx.log_event({"event": "strategy", "note": rationale[:280],
+                               "pair": ",".join(decision.get("active_pairs", []))})
             except Exception as e:
                 print(f"[strategist] loop error: {e}", flush=True)
             self.stop.wait(config.STRATEGIST_INTERVAL_S)
