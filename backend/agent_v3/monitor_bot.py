@@ -24,7 +24,7 @@ from agent_v3 import context_store as ctx
 
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
-SUMMARY_S = int(os.environ.get("MONITOR_SUMMARY_S", 1800))
+SUMMARY_S = int(os.environ.get("MONITOR_SUMMARY_S", 600))
 POLL_S = int(os.environ.get("MONITOR_POLL_S", 90))
 GAS_ALERT_SOMI = float(os.environ.get("MONITOR_GAS_ALERT_SOMI", 8.0))
 MILESTONE_USDSO = 500_000          # $25 reward per 500k volume (rules)
@@ -119,7 +119,8 @@ def run():
             # ── instant alerts ──
             if state["fills"] is not None and fills > state["fills"]:
                 send(f"✅ {fills - state['fills']} new fill(s) — total {fills}. "
-                     f"PnL {pnl:+.2f}, eff vol {row.get('volumeEffective', 0):,.0f}")
+                     f"raw vol {vol:,.0f}, eff vol {row.get('volumeEffective', 0):,.0f}, PnL {pnl:+.2f}")
+                last_summary = 0.0   # force a fresh summary card this loop
             ms = int(vol // MILESTONE_USDSO)
             if state["milestone"] is not None and ms > state["milestone"]:
                 send(f"🎯 Milestone! Crossed {ms * MILESTONE_USDSO:,} raw volume → {ms} × $25 reward")

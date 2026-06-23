@@ -69,6 +69,10 @@
 - **Strategist needs server ADC:** Gemini 2.5 Pro via Vertex requires `GOOGLE_CLOUD_PROJECT` + `gcloud auth application-default login` on the server. Falls back to safe deterministic defaults if absent.
 - **Two-sided simultaneous quoting deferred:** v1 uses the proven alternating no-bleed cycle (one resting side at a time — still earns yield). Simultaneous both-sides quoting for extra yield is a future enhancement.
 
+## 🟢 LIVE ON MAINNET (2026-06-24)
+- Two-sided MM deployed on server `~/dreamdex-r3` (containers `dreamdex-agent` + `dreamdex-monitor`, `feature/profit-maker-agent`). Strategist (Gemini 2.5 Pro via ADC) active, Telegram alerts delivering. Verified correct: SOMI resting bid + WBTC profit-sell, no stacking, no live errors, capital ~$150 accounted (free + bid reservation + WBTC inventory), 49.9 SOMI gas. Key-derives-wallet safety check passed pre-launch.
+- Deploy notes: server `~/dreamdex-agent` is gone (old R2 removed); new dir `~/dreamdex-r3`. Redeploy = `cd ~/dreamdex-r3 && git pull && cd backend && docker compose up -d --build`. Clear `inventory_state`/`agent_state` if restarting after a desync. ADC file mounted from host into container.
+
 ## Strategy pivot → two-sided market making (2026-06-24)
 - Recon: **no house MM** in docs — the tight book is a competitor MM (likely trader-3, who bled to −$108 PnL via taking → effective vol crushed to 7.7k). Live spreads: WETH ~1.4bps, WBTC ~2bps, **SOMI ~10bps (only one worth capturing)**. Yield at our size ≈ $0.16/2wk → negligible; profit must come from spread capture.
 - Goal restated: maximize `Raw Volume × (1+PnL%)` → high volume with PnL ≥ 0. Beat the bleeders by staying profitable.
