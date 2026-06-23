@@ -111,14 +111,6 @@ class PairMaker:
         else:
             self._sell_leg(snap, params)
 
-    def _open_ids(self) -> dict:
-        try:
-            return {str(o.get("orderId") or o.get("id") or o.get("order_id")): o
-                    for o in (self.dex.get_open_orders(self.pair) or [])}
-        except Exception as e:
-            print(f"[maker {self.pair}] get_open_orders failed: {e}", flush=True)
-            return {}
-
     def _buy_leg(self, snap, params):
         tick = snap["tick"]
         mid = snap["mid"]
@@ -184,52 +176,42 @@ class PairMaker:
             self.buy_px, self.buy_qty = 0.0, 0.0
 
     def _place_and_wait(self, snap, side, px, qty, tick) -> float:
-        """Place a PostOnly order, then track it by id until filled / drift / timeout.
-        Returns the filled quantity (0 if nothing filled). Always cancels our own
-        resting order before returning on drift/timeout, so it can't stack."""
-        before = set(self._open_ids().keys())
+        """Cancel any resting order on this pair, place ONE PostOnly order, and wait.
+
+        Returns the filled quantity, inferred from the wallet USDso delta (which
+        captures partial fills exactly and ignores gas, since gas is paid in the
+        native token). Cancelling everything before placing — and again before
+        returning — guarantees at most one order ever rests, so re-quotes and
+        partial fills can never stack.
+        """
+        self._cancel_open()                       # clear anything resting first
+        usdso0 = self._usdso()
+        # Native pools (SOMI) need the >=5M gas floor for the payout guard.
+        gas_min = config.SOMI_BUY_GAS_LIMIT if config.MARKETS.get(self.pair, {}).get("native") else 0
         res = self.dex.place_order(self.pair, side, qty, order_type="postonly",
-                                   limit_price=px, funding="wallet", skip_sim=True)
+                                   limit_price=px, funding="wallet", skip_sim=True, gas_min=gas_min)
         status = res.get("status")
-        if status == "success":            # filled inside place_order's settle window
-            return qty
-        if status not in ("placed_unfilled", "unverified"):
+        if status not in ("placed_unfilled", "unverified", "success"):
             ctx.log_event(self._ctx_row(snap, event="error", side=side, status=status,
                                         tx_hash=res.get("tx_hash"), note=str(res)[:120]))
             self.stop.wait(config.MAKER_POLL_S)
             return 0.0
 
-        # Identify our freshly-placed order id.
-        oid = None
-        for _ in range(3):
-            new = set(self._open_ids().keys()) - before
-            if new:
-                oid = next(iter(new))
-                break
-            self.stop.wait(2)
-
         deadline = time.time() + config.MAKER_REQUOTE_S
+
+        def _filled() -> float:
+            moved = (usdso0 - self._usdso()) if side == "buy" else (self._usdso() - usdso0)
+            return max(0.0, moved / px) if px else 0.0
+
         while not self.stop.is_set():
             self.stop.wait(config.MAKER_POLL_S)
-            cur = self._open_ids()
-            o = cur.get(oid) if oid else None
-            if oid and o is None:          # gone from the book → fully filled
+            f = _filled()
+            if f >= qty * 0.99:                   # fully filled
                 return qty
-            if o is not None:
-                remaining = float(o.get("remaining") or qty)
-                filled = max(0.0, qty - remaining)
-                s = self.md.snapshot(self.pair)
-                touch = (s["bid"] if side == "buy" else s["ask"]) if s else px
-                if abs(touch - px) > config.MAKER_DRIFT_TICKS * tick or time.time() > deadline:
-                    self._cancel_id(oid)   # cancel BEFORE returning → never stack
-                    return filled
-        # stopping: leave nothing resting
-        if oid:
-            self._cancel_id(oid)
-        return 0.0
-
-    def _cancel_id(self, oid: str):
-        try:
-            self.dex.cancel_order(self.pair, str(oid))
-        except Exception as e:
-            print(f"[maker {self.pair}] cancel {oid} failed: {e}", flush=True)
+            s = self.md.snapshot(self.pair)
+            touch = (s["bid"] if side == "buy" else s["ask"]) if s else px
+            if abs(touch - px) > config.MAKER_DRIFT_TICKS * tick or time.time() > deadline:
+                self._cancel_open()               # sweep the (partial) resting order
+                return _filled()                  # whatever actually filled
+        self._cancel_open()
+        return _filled()

@@ -583,18 +583,27 @@ class DreamDEX:
             return {"status": "error", "error": str(e)}
 
     def cancel_order(self, symbol: str, order_id: str) -> dict:
-        """Cancel an open order by ID."""
+        """Cancel an open order by ID.
+
+        Native pools (SOMI) revert the cancel below ~5M gas LIMIT because of the
+        native-payout gasleft guard (InsufficientGasForPayout) — same as native
+        buys — even though actual usage is tiny. So raise the floor for native
+        pools, and verify the receipt: a reverted cancel is reported as "revert",
+        not a false "cancelled" (which previously left orders stuck on the book)."""
         self._ensure_auth()
+        from config import MARKETS, SOMI_BUY_GAS_LIMIT
+        min_gas = SOMI_BUY_GAS_LIMIT if MARKETS.get(symbol, {}).get("native") else 0
         try:
             r = self._session.delete(
                 f"{self.base_url}/v0/markets/{symbol}/orders/{order_id}",
                 timeout=10,
             )
             if r.status_code != 200:
-                return {"status": "error", "code": r.status_code}
-            resp = r.json()
-            tx_hash = self.wallet.send_unsigned_tx(resp)
+                return {"status": "error", "code": r.status_code, "body": r.text[:200]}
+            tx_hash = self.wallet.send_unsigned_tx(r.json(), min_gas=min_gas)
             receipt = self.wallet.wait_for_receipt(tx_hash)
+            if int(receipt.get("status", 0)) != 1:
+                return {"status": "revert", "tx_hash": tx_hash}
             return {"status": "cancelled", "tx_hash": tx_hash}
         except Exception as e:
             return {"status": "error", "error": str(e)}
