@@ -41,6 +41,7 @@ class Runner:
         self.stop = threading.Event()
         self._lock = threading.Lock()
         self.decision = default_decision()
+        self.start_ts = time.time()
 
         # cached working-capital reader (avoid hammering RPC from every leg)
         self._cap_val = 0.0
@@ -104,8 +105,10 @@ class Runner:
     def _liveness_loop(self):
         while not self.stop.is_set():
             try:
-                last = ctx.last_trade_ts()
-                idle = time.time() - last if last else config.LIVENESS_MAX_IDLE_S + 1
+                # Baseline off the last fill, or our start time on a fresh run —
+                # so an empty trade history at boot doesn't false-trip the guard.
+                baseline = max(ctx.last_trade_ts(), self.start_ts)
+                idle = time.time() - baseline
                 if idle > config.LIVENESS_MAX_IDLE_S:
                     # Approaching the 24h DQ — force the most liquid pair active + tight.
                     with self._lock:
