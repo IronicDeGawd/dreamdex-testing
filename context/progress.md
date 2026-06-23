@@ -40,10 +40,17 @@
 - **DEX quirks (verify still true in R3):** `expireTimestampNs=0` silently rejected (use `(now+3600)*1e9`). `getPoolParams()` = flat 7-tuple (base,quote,makerBps,takerBps,tick,minQty,lot). `selfMatchingOption=1` (CancelMaker). Somnia gas non-standard (ERC20 transfers need `gas=2,000,000`). native sentinel for SOMI vault = `0x28f34DeFd2b4CB48d9eE6d89f2Be4Bc601694c00`, NOT address(0). `OrderPlaced` emits filled=0 even on real fills + `getOwnOpenOrders` returns empty → use balance delta as fill signal. **pgrep ABSENT in container** → detect process via `/proc` cmdline filtered to `comm=python*` (naive grep matches your OWN command).
 - **Opponents' methods (R2, decoded):** `placeTakerOrderWithoutVault` was deprecated mid-R2 (started reverting unconditionally — devs disabled it). `placeOrder` (vault-based, selector `0x4e978373`, IOC) was the live path. All top traders fill ~100% by crossing aggressively or polling fast — our 64% was self-inflicted (tight slip + verify latency).
 
-## Known Issues — R3 profit agent (NEEDS testnet validation before mainnet)
-- **Execution path unrun against live API.** `agent_v3/maker.py` places real orders; verify on testnet first.
-- **`get_open_orders` / `cancel_order` reliability:** R2 saw `getOwnOpenOrders` return empty. The maker's drift-requote path cancels by id from `get_open_orders` — if that returns nothing, requote can't cancel cleanly (risk of stacked orders). Re-test; if broken, fix the cancel path (docs say it returns data now).
-- **Fill detection threshold:** maker infers fills from wallet USDso delta ≥ 50% of notional. Tune against real partial-fill behavior on testnet.
+## Testnet validation results (2026-06-24)
+- ✅ **PostOnly placement + fill works** on testnet SOMI:USDso (bought 9.91 @ 0.1009, filled).
+- ✅ **No-bleed invariant held** (sell quoted @ 0.1011 = buy + 2 margin ticks).
+- ✅ **`get_open_orders` + `cancel_order` WORK in R3** (R2 blocker resolved — returns full order rows incl. `id`,`remaining`,`filled`,`status`; cancels confirmed). Fill detection is now status-based off this.
+- ⚠️ **WETH/WBTC PostOnly buys reverted** on testnet ($1 leg → likely sub-minQuantity or PostOnly-cross). SOMI path clean. Investigate min sizes per pair before relying on WETH/WBTC.
+- 🐛 **FIXED — order stacking + missed partial:** re-quote left a stale sell resting (got 2 stacked; one partial-filled 3/9.91) because cancel-before-replace wasn't airtight and the 50%-notional threshold missed the partial. Reworked to id-based fill detection (track our order, read `remaining`) + always cancel our order before re-placing.
+
+## Known Issues — R3 profit agent
+- **Execution path:** SOMI cycle validated on testnet; id-based fill/no-stack rework is committed + compiles but NOT yet re-validated live (testnet wallet ran out of USDso — ~1.2 left + holding ~7 SOMI). Re-validate after topping up testnet USDso. Validate WETH/WBTC min sizes before mainnet (their $1 PostOnly buys reverted — likely sub-minQuantity).
+- **🐛 Inventory resets on restart (MUST FIX before mainnet):** `Inventory` is in-memory, so after a restart the bot ignores base it still holds on-chain — it thinks it is flat and buys more instead of selling. Fix: persist positions+avg_cost (e.g. a SQLite state table) and reload on startup; or reconcile base from on-chain balance at boot. `run()`'s "resume if base>0" check reads the in-memory base (always 0 on fresh start), so it never triggers.
+- **Testnet wallet state:** low USDso + holding ~7 SOMI + in-memory/on-chain desync. Liquidate SOMI→USDso or top up before the next testnet round.
 - **Native SOMI pair making:** SOMI base is native; quote-side (USDso) delta still detects fills, but base inventory tracking on the native pool is less clean — validate or keep SOMI pair gas-only at first.
 - **Strategist needs server ADC:** Gemini 2.5 Pro via Vertex requires `GOOGLE_CLOUD_PROJECT` + `gcloud auth application-default login` on the server. Falls back to safe deterministic defaults if absent.
 - **Two-sided simultaneous quoting deferred:** v1 uses the proven alternating no-bleed cycle (one resting side at a time — still earns yield). Simultaneous both-sides quoting for extra yield is a future enhancement.
