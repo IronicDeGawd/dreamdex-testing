@@ -26,10 +26,14 @@
 │   ├── docker-compose.yml           # Compose config (network_mode: host, .env secrets)
 │   ├── requirements.txt              # pip dependencies
 │   ├── .env                         # Secrets: FLASK_API_KEY, RPC_URL, OPENAI_KEY (not in git)
+│   ├── buy_gas.py                   # Swap USDso→SOMI on SOMI pool to refuel gas agent
 │   ├── check_balance.py             # Utility: read wallet balance snapshot
+│   ├── gas_topup.sh                 # Drop-safe orchestration: disable keepalive → kill burst → buy gas → restart
 │   ├── smoke_testnet.py             # End-to-end test on testnet
 │   ├── smoke_live_order.py          # Test live order (mainnet)
 │   ├── test_connectivity.py         # Network diagnostics
+│   ├── burst_keepalive.sh           # Host cron (every 2 min): detect stalls via pgrep, restart if dead
+│   ├── run_direct_burst.sh          # Direct-RPC burst engine: defaults USDC.e:USDso, reads key from container env
 │   ├── logs/                        # Agent + server logs (local only)
 │   ├── pyrightconfig.json           # Type checking config
 │   └── .venv/                       # Virtual environment (git-ignored)

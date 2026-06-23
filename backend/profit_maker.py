@@ -39,7 +39,7 @@ import argparse
 sys.path.insert(0, "/app")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-PAIR = "USDC.e:USDso"
+PAIR = os.environ.get("PROFIT_PAIR", "WETH:USDso")  # devs banned the stablecoin pair
 
 # ── Config (env-overridable) ───────────────────────────────────────────────
 KEY          = os.environ.get("PROFIT_PRIVATE_KEY")
@@ -49,6 +49,7 @@ MARGIN_TICKS = int(os.environ.get("PROFIT_MARGIN_TICKS", "3"))   # SELL ≥ buy 
 REQUOTE_S    = int(os.environ.get("PROFIT_REQUOTE_S", "1800"))   # let orders sit this long before considering a re-quote
 DRIFT_TICKS  = int(os.environ.get("PROFIT_DRIFT_TICKS", "5"))    # only re-quote if book moved this far from our price
 GAS_RESERVE  = float(os.environ.get("PROFIT_GAS_RESERVE_SOMI", "0.3"))
+FUNDING      = os.environ.get("PROFIT_FUNDING", "wallet")  # wallet|vault; wallet avoids the vault-inventory wedge (buy fill lands in wallet, so sell must read wallet too)
 MAX_LOSS     = float(os.environ.get("PROFIT_MAX_LOSS", "0.10"))  # hard backstop; should never trip
 POLL_S       = float(os.environ.get("PROFIT_POLL_S", "10"))
 STATS_PATH   = os.environ.get("PROFIT_STATS_PATH", "/tmp/profit_maker_stats.json")
@@ -69,6 +70,11 @@ _ERC20_ABI = [{"name": "balanceOf", "type": "function", "stateMutability": "view
 _WB_ABI = [{"name": "getWithdrawableBalance", "type": "function", "stateMutability": "view",
             "inputs": [{"name": "u", "type": "address"}, {"name": "t", "type": "address"}],
             "outputs": [{"name": "", "type": "uint256"}]}]
+_POOLPARAMS_ABI = [{"inputs": [], "name": "getPoolParams", "outputs": [
+    {"name": "baseToken", "type": "address"}, {"name": "quoteToken", "type": "address"},
+    {"name": "makerFeeBpsTimes1k", "type": "uint256"}, {"name": "takerFeeBpsTimes1k", "type": "uint256"},
+    {"name": "tickSize", "type": "uint256"}, {"name": "minQuantity", "type": "uint256"},
+    {"name": "lotSize", "type": "uint256"}], "stateMutability": "view", "type": "function"}]
 
 _stats = {
     "wallet": ADDR, "pair": PAIR, "state": "flat",
@@ -138,6 +144,17 @@ def _balances(w3):
     }
 
 
+def _pool_params(w3):
+    """Fetch real tick/lot/minQty from the pool (human units). The MARKETS dict
+    has no tick/lot/minQty, and they differ per pair — never hard-code them."""
+    pool, base, quote, bd, qd = _mkt()
+    p = w3.eth.contract(address=pool, abi=_POOLPARAMS_ABI).functions.getPoolParams().call()
+    tick = p[4] / 10**qd
+    minq = p[5] / 10**bd
+    lot  = p[6] / 10**bd
+    return tick, lot, minq
+
+
 def _snap(px, tick):
     dec = len(f"{tick:.10f}".rstrip("0").split(".")[1])
     return round(round(px / tick) * tick, dec)
@@ -195,6 +212,10 @@ def _wait(dex, w3, side, bal0, resting_px, tick):
             if errs >= 5: return "error"
             continue
         errs = 0
+        # Heartbeat: a successful poll means the loop is healthy (just waiting to
+        # be hit). Refresh the watchdog timestamp so the keepalive's stall check
+        # only fires on a genuine hang, not on a maker patiently resting.
+        _stats["last_action_ts"] = time.time(); _write_stats()
         # Fill detection by balance delta (works for vault-funded fills).
         if side == "buy":
             if (b["base"] - bal0["base"]) > 0.005 and (bal0["quote"] - b["quote"]) > 0.005:
@@ -218,20 +239,34 @@ def _wait(dex, w3, side, bal0, resting_px, tick):
 
 
 def run(dex, w3, smoke=False):
-    assert PAIR == "USDC.e:USDso", "PAIR must be USDC.e:USDso"
-    m = MARKETS[PAIR]
-    tick = float(m.get("tickSize", 0.0001))
-    lot  = float(m.get("lotSize", 0.01))
-    minq = float(m.get("minQuantity", 1.0))
+    assert not MARKETS[PAIR].get("native"), "native SOMI maker SELL unsupported on dreamDEX"
+    tick, lot, minq = _pool_params(w3)
     _log(f"start wallet={ADDR} leg=${LEG_USD} margin={MARGIN_TICKS}t requote={REQUOTE_S}s drift={DRIFT_TICKS}t")
 
-    b = _balances(w3)
+    _cancel(dex)  # cancel stragglers FIRST so any reserved base/quote returns
+    time.sleep(3)
+    b = _balances(w3)  # read AFTER cancel so freed inventory is counted
     _log(f"P balances: base={b['base']:.4f} quote={b['quote']:.4f} (w={b['w_quote']:.4f} v={b['v_quote']:.4f}) somi={b['somi']:.4f}")
 
-    _cancel(dex)  # clear any stragglers
-    buy_px = buy_qty = None
-    if _stats["state"] != "long":
+    buy_px = None
+    buy_qty = None
+    # Inventory-aware start: if we already hold a sellable amount of base
+    # (e.g. left over from a prior run or a taker buy), start LONG and sell it
+    # as a maker (PostOnly sells fill here; taker sells silently reject on this
+    # pool). Otherwise start flat and buy first.
+    if b["base"] >= minq:
+        buy_qty = round((b["base"] // lot) * lot, 10) if lot else b["base"]
+        _stats["state"] = "long"
+        _log(f"startup: holding {b['base']:.8f} base >= minQty {minq} -> start LONG, sell {buy_qty}")
+    else:
         _stats["state"] = "flat"
+
+    # Stamp a fresh heartbeat on startup so the keepalive's stall-watchdog
+    # (which restarts us if last_action_ts goes stale) doesn't false-trigger
+    # right after a restart.
+    _stats["last_action"] = "startup"
+    _stats["last_action_ts"] = time.time()
+    _write_stats()
 
     while True:
         if _stats["realized_pnl"] <= -MAX_LOSS:
@@ -253,13 +288,13 @@ def run(dex, w3, smoke=False):
                 if buy_px >= ask:
                     _log(f"bid {buy_px} >= ask {ask}; would cross — wait"); time.sleep(10); continue
                 buy_qty = max(minq, round(round((LEG_USD / buy_px) / lot) * lot, 6))
-                if not _ensure_vault_usdso(dex, w3, buy_qty * buy_px + 0.02):
+                if FUNDING == "vault" and not _ensure_vault_usdso(dex, w3, buy_qty * buy_px + 0.02):
                     time.sleep(30); continue
                 bal0 = _balances(w3)
                 _log(f"POST BUY {buy_qty} @ {buy_px} (bid={bid} ask={ask})")
                 r = dex.place_order(symbol=PAIR, side="buy", qty=buy_qty,
                                     order_type="postonly", limit_price=buy_px,
-                                    funding="vault", skip_sim=True)
+                                    funding=FUNDING, skip_sim=True)
                 st = r.get("status", "")
                 if st not in ("placed_unfilled", "success", "unverified"):
                     _log(f"BUY not resting (status={st}) — retry later"); _stats["errors"] += 1; time.sleep(10); continue
@@ -293,7 +328,7 @@ def run(dex, w3, smoke=False):
                 _log(f"POST SELL {qty} @ {sell_px} (floor={floor:.4f} bid={bid} ask={ask} bought@{buy_px})")
                 r = dex.place_order(symbol=PAIR, side="sell", qty=qty,
                                     order_type="postonly", limit_price=sell_px,
-                                    funding="vault", skip_sim=True)
+                                    funding=FUNDING, skip_sim=True)
                 st = r.get("status", "")
                 if st not in ("placed_unfilled", "success", "unverified"):
                     _log(f"SELL not resting (status={st}) — re-quote later"); _stats["errors"] += 1; _cancel(dex); time.sleep(10); continue
@@ -327,7 +362,14 @@ def run(dex, w3, smoke=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--shutdown", action="store_true",
+                    help="cancel any open order on PAIR and exit (frees vault funds for hand-off)")
     args = ap.parse_args()
+    if args.shutdown:
+        dex = DreamDEX(private_key=KEY, address=ADDR)
+        ok = _cancel(dex)
+        _log(f"shutdown: open order cancelled={ok}")
+        return
     if not args.smoke:
         _acquire_pid()
         signal.signal(signal.SIGTERM, lambda *_: (_release_pid(), sys.exit(0)))
