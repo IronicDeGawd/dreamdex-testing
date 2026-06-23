@@ -80,6 +80,9 @@ class PairMaker:
 
     # ── lifecycle ──────────────────────────────────────────────────────────
     def run(self):
+        # Clear any orders left resting by a prior crash so we start clean.
+        if not self.dry_run:
+            self._cancel_open()
         # Resume a prior long position if we already hold inventory.
         if self.inv.base(self.pair) > 0:
             self.state = "long"
@@ -107,6 +110,14 @@ class PairMaker:
             self._buy_leg(snap, params)
         else:
             self._sell_leg(snap, params)
+
+    def _open_ids(self) -> dict:
+        try:
+            return {str(o.get("orderId") or o.get("id") or o.get("order_id")): o
+                    for o in (self.dex.get_open_orders(self.pair) or [])}
+        except Exception as e:
+            print(f"[maker {self.pair}] get_open_orders failed: {e}", flush=True)
+            return {}
 
     def _buy_leg(self, snap, params):
         tick = snap["tick"]
@@ -136,26 +147,17 @@ class PairMaker:
             self.stop.wait(config.MAKER_POLL_S)
             return
 
-        usdso0 = self._usdso()
-        res = self.dex.place_order(self.pair, "buy", qty, order_type="postonly",
-                                   limit_price=buy_px, funding="wallet", skip_sim=True)
-        status = res.get("status")
-        if status not in ("placed_unfilled", "unverified", "success"):
-            ctx.log_event(self._ctx_row(snap, event="error", side="buy", status=status,
-                                        tx_hash=res.get("tx_hash"), note=str(res)[:120]))
-            self.stop.wait(config.MAKER_POLL_S)
-            return
-        outcome = self._wait_fill("buy", usdso0, buy_px, qty, tick)
-        if outcome == "filled":
-            self.inv.record_fill(self.pair, "buy", buy_px, qty)
-            self.buy_px, self.buy_qty = buy_px, qty
+        filled = self._place_and_wait(snap, "buy", buy_px, qty, tick)
+        if filled > 0:
+            self.inv.record_fill(self.pair, "buy", buy_px, filled)
+            self.buy_px, self.buy_qty = buy_px, self.inv.base(self.pair)
             self.state = "long"
-            ctx.log_event(self._ctx_row(snap, event="fill", side="buy", our_px=buy_px, qty=qty,
+            ctx.log_event(self._ctx_row(snap, event="fill", side="buy", our_px=buy_px, qty=filled,
                                         status="success", realized_pnl_delta=0.0))
 
     def _sell_leg(self, snap, params):
         tick = snap["tick"]
-        qty = min(self.buy_qty or self.inv.base(self.pair), self.inv.base(self.pair))
+        qty = self.inv.base(self.pair)
         if qty <= 0:
             self.state = "flat"
             return
@@ -171,43 +173,63 @@ class PairMaker:
             self.stop.wait(config.MAKER_POLL_S)
             return
 
-        usdso0 = self._usdso()
-        res = self.dex.place_order(self.pair, "sell", qty, order_type="postonly",
-                                   limit_price=sell_px, funding="wallet", skip_sim=True)
-        status = res.get("status")
-        if status not in ("placed_unfilled", "unverified", "success"):
-            ctx.log_event(self._ctx_row(snap, event="error", side="sell", status=status,
-                                        tx_hash=res.get("tx_hash"), note=str(res)[:120]))
-            self.stop.wait(config.MAKER_POLL_S)
-            return
-        outcome = self._wait_fill("sell", usdso0, sell_px, qty, tick)
-        if outcome == "filled":
-            delta = self.inv.record_fill(self.pair, "sell", sell_px, qty)
+        filled = self._place_and_wait(snap, "sell", sell_px, qty, tick)
+        if filled > 0:
+            delta = self.inv.record_fill(self.pair, "sell", sell_px, filled)
+            ctx.log_event(self._ctx_row(snap, event="fill", side="sell", our_px=sell_px, qty=filled,
+                                        status="success", realized_pnl_delta=delta))
+            print(f"[maker {self.pair}] sold {filled:.4f} +{delta:.4f} USDso (cum {self.inv.realized_pnl:.4f})", flush=True)
+        if self.inv.base(self.pair) <= (snap.get("minq") or 0):
             self.state = "flat"
             self.buy_px, self.buy_qty = 0.0, 0.0
-            ctx.log_event(self._ctx_row(snap, event="fill", side="sell", our_px=sell_px, qty=qty,
-                                        status="success", realized_pnl_delta=delta))
-            print(f"[maker {self.pair}] round-trip +{delta:.4f} USDso (cum {self.inv.realized_pnl:.4f})", flush=True)
 
-    def _wait_fill(self, side, usdso0, resting_px, qty, tick) -> str:
-        """Poll wallet USDso for the fill. Re-quote on drift/timeout. Returns
-        'filled' | 'requote' | 'stop'. A buy fill drops USDso; a sell fill raises it."""
-        notional = qty * resting_px
-        thresh = max(0.01, notional * 0.5)   # half-notional → robust to partials/price
+    def _place_and_wait(self, snap, side, px, qty, tick) -> float:
+        """Place a PostOnly order, then track it by id until filled / drift / timeout.
+        Returns the filled quantity (0 if nothing filled). Always cancels our own
+        resting order before returning on drift/timeout, so it can't stack."""
+        before = set(self._open_ids().keys())
+        res = self.dex.place_order(self.pair, side, qty, order_type="postonly",
+                                   limit_price=px, funding="wallet", skip_sim=True)
+        status = res.get("status")
+        if status == "success":            # filled inside place_order's settle window
+            return qty
+        if status not in ("placed_unfilled", "unverified"):
+            ctx.log_event(self._ctx_row(snap, event="error", side=side, status=status,
+                                        tx_hash=res.get("tx_hash"), note=str(res)[:120]))
+            self.stop.wait(config.MAKER_POLL_S)
+            return 0.0
+
+        # Identify our freshly-placed order id.
+        oid = None
+        for _ in range(3):
+            new = set(self._open_ids().keys()) - before
+            if new:
+                oid = next(iter(new))
+                break
+            self.stop.wait(2)
+
         deadline = time.time() + config.MAKER_REQUOTE_S
         while not self.stop.is_set():
             self.stop.wait(config.MAKER_POLL_S)
-            if self.stop.is_set():
-                return "stop"
-            now = self._usdso()
-            if side == "buy" and (usdso0 - now) >= thresh:
-                return "filled"
-            if side == "sell" and (now - usdso0) >= thresh:
-                return "filled"
-            snap = self.md.snapshot(self.pair)
-            if snap:
-                touch = snap["bid"] if side == "buy" else snap["ask"]
-                if abs(touch - resting_px) > config.MAKER_DRIFT_TICKS * tick or time.time() > deadline:
-                    self._cancel_open()
-                    return "requote"
-        return "stop"
+            cur = self._open_ids()
+            o = cur.get(oid) if oid else None
+            if oid and o is None:          # gone from the book → fully filled
+                return qty
+            if o is not None:
+                remaining = float(o.get("remaining") or qty)
+                filled = max(0.0, qty - remaining)
+                s = self.md.snapshot(self.pair)
+                touch = (s["bid"] if side == "buy" else s["ask"]) if s else px
+                if abs(touch - px) > config.MAKER_DRIFT_TICKS * tick or time.time() > deadline:
+                    self._cancel_id(oid)   # cancel BEFORE returning → never stack
+                    return filled
+        # stopping: leave nothing resting
+        if oid:
+            self._cancel_id(oid)
+        return 0.0
+
+    def _cancel_id(self, oid: str):
+        try:
+            self.dex.cancel_order(self.pair, str(oid))
+        except Exception as e:
+            print(f"[maker {self.pair}] cancel {oid} failed: {e}", flush=True)
