@@ -42,14 +42,28 @@ class Strategist:
     def _try_init(self):
         try:
             from google import genai  # google-genai
+            if config.GEMINI_USE_VERTEX and not config.GEMINI_PROJECT:
+                print("[strategist] ⚠️  GOOGLE_CLOUD_PROJECT unset — Vertex/ADC will likely fail", flush=True)
             self._client = genai.Client(
                 vertexai=config.GEMINI_USE_VERTEX,
                 project=config.GEMINI_PROJECT or None,
                 location=config.GEMINI_LOCATION,
             )
+            self._ping()
         except Exception as e:
             self._init_error = str(e)
+            self._client = None
             print(f"[strategist] init failed, using defaults: {e}", flush=True)
+
+    def _ping(self):
+        """One cheap call so deploy logs confirm ADC works (or fail loud)."""
+        resp = self._client.models.generate_content(
+            model=config.GEMINI_MODEL, contents="reply with: ok",
+            config={"temperature": 0.0},
+        )
+        print(f"[strategist] Gemini reachable via {'Vertex/ADC' if config.GEMINI_USE_VERTEX else 'API'} "
+              f"(model={config.GEMINI_MODEL}, project={config.GEMINI_PROJECT or '-'}): {(resp.text or '').strip()[:20]}",
+              flush=True)
 
     @property
     def available(self) -> bool:
