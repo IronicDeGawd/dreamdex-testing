@@ -171,6 +171,27 @@ def cum_pnl() -> float:
     return float(r["cum_pnl"]) if r and r["cum_pnl"] is not None else 0.0
 
 
+def set_control(enabled: bool) -> None:
+    """Shared on/off flag — monitor (Telegram) sets it, agent reads it each tick."""
+    try:
+        with _connect() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS agent_state (k TEXT PRIMARY KEY, v REAL)")
+            conn.execute("INSERT OR REPLACE INTO agent_state(k, v) VALUES ('enabled', ?)",
+                         (1.0 if enabled else 0.0,))
+    except Exception as e:
+        print(f"[context_store] set_control failed: {e}", flush=True)
+
+
+def control_enabled() -> bool:
+    """True unless explicitly stopped. Defaults to enabled if never set."""
+    try:
+        with _connect() as conn:
+            r = conn.execute("SELECT v FROM agent_state WHERE k='enabled'").fetchone()
+        return True if r is None or r["v"] is None else bool(r["v"])
+    except Exception:
+        return True
+
+
 def latest_strategy() -> dict | None:
     """Most recent Gemini strategist rationale (for the Telegram feed)."""
     with _connect() as conn:

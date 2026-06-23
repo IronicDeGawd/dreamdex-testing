@@ -146,6 +146,21 @@ class Runner:
                 print(f"[liveness] loop error: {e}", flush=True)
             self.stop.wait(600)
 
+    def _control_loop(self):
+        """Auto-stop if total account value (USDso + inventory) falls below the
+        capital floor. Sets the shared flag; makers then flatten to USDso."""
+        while not self.stop.is_set():
+            try:
+                if ctx.control_enabled():
+                    value = self.total_usdso() + self.inv.inventory_value_usdso(self._mids())
+                    if value < config.MIN_CAPITAL_STOP:
+                        ctx.set_control(False)
+                        print(f"[control] account value ${value:.2f} < ${config.MIN_CAPITAL_STOP:.0f} "
+                              f"→ AUTO-STOP (flattening to USDso)", flush=True)
+            except Exception as e:
+                print(f"[control] loop error: {e}", flush=True)
+            self.stop.wait(60)
+
     def _mids(self) -> dict:
         out = {}
         for p in config.ELIGIBLE_PAIRS:
@@ -169,6 +184,7 @@ class Runner:
         threads.append(threading.Thread(target=self._strategist_loop, name="strategist", daemon=True))
         threads.append(threading.Thread(target=self._gas_loop, name="gas", daemon=True))
         threads.append(threading.Thread(target=self._liveness_loop, name="liveness", daemon=True))
+        threads.append(threading.Thread(target=self._control_loop, name="control", daemon=True))
 
         print(f"[runner] starting — env={config.ENV} dry_run={DRY_RUN} pairs={config.ELIGIBLE_PAIRS}", flush=True)
         for t in threads:

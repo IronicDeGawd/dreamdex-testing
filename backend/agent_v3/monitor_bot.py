@@ -49,6 +49,47 @@ def send(text: str):
         print(f"[monitor] telegram send failed: {e}", flush=True)
 
 
+def _tg_get(method: str, params: dict) -> dict:
+    r = requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/{method}", params=params, timeout=15)
+    return r.json()
+
+
+def drain_commands() -> int:
+    """Return the next update offset, skipping any messages sent before startup."""
+    if not (TG_TOKEN and TG_CHAT):
+        return 0
+    try:
+        ups = _tg_get("getUpdates", {"timeout": 0}).get("result", [])
+        return ups[-1]["update_id"] + 1 if ups else 0
+    except Exception:
+        return 0
+
+
+def poll_commands(offset: int) -> tuple[int, bool]:
+    """Handle /stop /start /status from the configured chat. Returns (new_offset, want_status)."""
+    want_status = False
+    if not (TG_TOKEN and TG_CHAT):
+        return offset, want_status
+    try:
+        data = _tg_get("getUpdates", {"offset": offset, "timeout": 0})
+    except Exception:
+        return offset, want_status
+    for u in data.get("result", []):
+        offset = u["update_id"] + 1
+        msg = u.get("message") or {}
+        text = (msg.get("text") or "").strip().lower()
+        chat = str((msg.get("chat") or {}).get("id", ""))
+        if chat != str(TG_CHAT):
+            continue
+        if text.startswith("/stop"):
+            ctx.set_control(False)
+        elif text.startswith("/start"):
+            ctx.set_control(True)
+        elif text.startswith("/status"):
+            want_status = True
+    return offset, want_status
+
+
 def fetch_leaderboard() -> dict | None:
     try:
         r = requests.get(config.LEADERBOARD_URL, timeout=20)
@@ -186,11 +227,24 @@ def run():
     print(f"[monitor] starting — telegram={'on' if (TG_TOKEN and TG_CHAT) else 'OFF (stdout only)'} "
           f"summary={SUMMARY_S}s poll={POLL_S}s wallet={OUR_ADDR}", flush=True)
     state = {"fills": None, "rank": None, "pnl_neg": None, "milestone": None,
-             "gas_low": False, "idle_warned": False, "strategy_ts": None}
+             "gas_low": False, "idle_warned": False, "strategy_ts": None,
+             "enabled": ctx.control_enabled()}
     last_summary = 0.0
     last_preview = 0.0
+    cmd_offset = drain_commands()
+    send("🤖 <b>DreamDEX V3 monitor online.</b> Commands: /stop  /start  /status")
 
     while True:
+        # handle Telegram commands first, then announce any on/off change
+        cmd_offset, want_status = poll_commands(cmd_offset)
+        enabled = ctx.control_enabled()
+        if enabled != state["enabled"]:
+            send("🛑 <b>Agent STOPPED</b> — flattening inventory to USDso, then idle."
+                 if not enabled else "▶️ <b>Agent STARTED</b> — resuming market-making.")
+            state["enabled"] = enabled
+        if want_status:
+            last_summary = 0.0   # force a summary card this loop
+
         lb = fetch_leaderboard()
         row, rank, total = our_standing(lb)       # leaderboard: volume + rank only
         bal = chain_balances()

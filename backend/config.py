@@ -84,6 +84,10 @@ ERC20_GAS_LIMIT     = 2_000_000   # Somnia ERC20 transfers need 2M
 # Liveness: >24h with no on-chain trade = auto-DQ. Force a tick well before that.
 LIVENESS_MAX_IDLE_S = int(os.environ.get("LIVENESS_MAX_IDLE_S", 18 * 3600))  # 18h safety margin
 
+# Capital safety floor: if total account value (USDso + inventory) drops below
+# this, the agent auto-stops (flattens to USDso and idles until /start).
+MIN_CAPITAL_STOP = float(os.environ.get("MIN_CAPITAL_STOP", 100.0))
+
 # ── Flask server ──────────────────────────────────────────
 FLASK_HOST = "0.0.0.0"
 FLASK_PORT = int(os.environ.get("FLASK_PORT", 5001))
