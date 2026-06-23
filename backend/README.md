@@ -93,6 +93,14 @@ runs unaffected. Launch with `STRATEGIST_ENABLED=false` to run pure deterministi
 
 Tunables (leg size, margin, reserve, poll/requote timers) are all env-overridable — see `config.py`.
 
+**Monitor bot (Telegram):** `agent_v3/monitor_bot.py` runs as a second container (`dreamdex-monitor`
+in compose) — read-only, no key. It combines the leaderboard API, our `quote_context` store, and
+on-chain balances into a summary every ~30 min plus instant alerts (new fills, $25 milestones, rank
+changes, PnL-negative, low gas, >18h idle/DQ-risk). Create a bot via @BotFather and set
+`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` in `.env` (without them it prints to stdout). Tunables:
+`MONITOR_SUMMARY_S` (1800), `MONITOR_POLL_S` (90), `MONITOR_GAS_ALERT_SOMI` (8). Run standalone with
+`python -m agent_v3.monitor_bot`.
+
 ## Status — NOT live; testnet validation required before mainnet
 Branch `feature/profit-maker-agent`. All modules build and import. The execution path places REAL
 orders and has **not yet been run against the live API**, so before funding the mainnet wallet:

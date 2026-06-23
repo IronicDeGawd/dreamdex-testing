@@ -29,3 +29,17 @@ services:
       timeout: 5s
       retries: 3
       start_period: 120s
+
+  # Telegram profit/trade monitor (read-only: leaderboard + agent.db + public RPC).
+  # No private key, no ADC. Needs TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env.
+  monitor:
+    build: .
+    image: dreamdex-agent:latest
+    container_name: dreamdex-monitor
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data   # read the agent's quote_context for fills/idle
+    command: ["python3", "-m", "agent_v3.monitor_bot"]
