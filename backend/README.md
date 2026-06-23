@@ -66,7 +66,35 @@ spread_bps, bid_depth, ask_depth, short_vol, inv_base, inv_usdso, working_capita
 order_type, status, tx_hash, realized_pnl_delta, cum_pnl`. This is both the audit trail and the
 dataset the strategist reasons over.
 
-## Status
-Scaffolding in progress on branch `feature/profit-maker-agent`. Not deployed. Do not start the
-engine until built, funded ($150 USDso to `0xD84fE2a2220f0269e3d88dab908ADceb2d691E76`), and the
-user says go. Deploy/runbook steps land here as the build completes.
+## Run / deploy
+```bash
+# Local dry run (quotes + logs to sqlite, places NO orders):
+cd backend
+DREAMDEX_ENV=testnet DRY_RUN=1 AGENT_DB_PATH=./data/agent.db ./.venv/bin/python -m agent_v3.runner
+
+# Testnet live (real testnet orders — validate fill detection + requote here FIRST):
+DREAMDEX_ENV=testnet TESTNET_PRIVATE_KEY=0x... ./.venv/bin/python -m agent_v3.runner
+
+# Server (docker): build + up
+docker compose build && docker compose up -d
+docker exec dreamdex-agent tail -f /app/logs/...   # or: docker logs -f dreamdex-agent
+```
+Required env (in `backend/.env`, never committed): `DREAMDEX_ENV=mainnet`,
+`MAINNET_PRIVATE_KEY=0x...`, `WALLET_ADDRESS=0xD84f...1E76`. For the strategist:
+`GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, and ADC on the server
+(`gcloud auth application-default login`). Set `STRATEGIST_ENABLED=false` to run pure
+deterministic. Tunables (leg size, margin, reserve, poll/requote timers) are all env-overridable
+— see `config.py`.
+
+## Status — NOT live; testnet validation required before mainnet
+Branch `feature/profit-maker-agent`. All modules build and import. The execution path places REAL
+orders and has **not yet been run against the live API**, so before funding the mainnet wallet:
+1. **Dry run** (`DRY_RUN=1`) — confirm quoting math, spreads, and context logging look right.
+2. **Testnet live** — confirm: PostOnly orders actually rest (`placed_unfilled`), fills are caught
+   by USDso balance delta, and `get_open_orders`/`cancel_order` work for the re-quote path
+   (R2 saw `getOwnOpenOrders` return empty — re-verify; if broken, the requote/cancel needs a fix).
+3. Tune `MAKER_LEG_USD`, `MAKER_MARGIN_TICKS`, fill threshold, and timers from testnet behavior.
+4. Only then: fund $150 USDso → `0xD84fE2a2220f0269e3d88dab908ADceb2d691E76`, set
+   `DREAMDEX_ENV=mainnet`, `docker compose up -d` — **on the user's go.**
+
+Known open items tracked in `../context/progress.md` → Known Issues (R3).

@@ -40,7 +40,16 @@
 - **DEX quirks (verify still true in R3):** `expireTimestampNs=0` silently rejected (use `(now+3600)*1e9`). `getPoolParams()` = flat 7-tuple (base,quote,makerBps,takerBps,tick,minQty,lot). `selfMatchingOption=1` (CancelMaker). Somnia gas non-standard (ERC20 transfers need `gas=2,000,000`). native sentinel for SOMI vault = `0x28f34DeFd2b4CB48d9eE6d89f2Be4Bc601694c00`, NOT address(0). `OrderPlaced` emits filled=0 even on real fills + `getOwnOpenOrders` returns empty → use balance delta as fill signal. **pgrep ABSENT in container** → detect process via `/proc` cmdline filtered to `comm=python*` (naive grep matches your OWN command).
 - **Opponents' methods (R2, decoded):** `placeTakerOrderWithoutVault` was deprecated mid-R2 (started reverting unconditionally — devs disabled it). `placeOrder` (vault-based, selector `0x4e978373`, IOC) was the live path. All top traders fill ~100% by crossing aggressively or polling fast — our 64% was self-inflicted (tight slip + verify latency).
 
-## Resume From Here (2026-06-23 — awaiting R3 rules)
-- **Done:** new R3 wallet created + key on server (`MAINNET_PRIVATE_KEY`), R2 `.env` backed up, progress compacted.
-- **Next:** (1) user shares R3 rules → read + assess what changes; (2) wire USDso→SOMI self-gas top-up (`placeOrder` BUY on SOMI:USDso at `gas≥5,000,000`; sim with the same gas) so the bot never stalls on gas; (3) confirm `aware_burst_vault.py` still valid; (4) fund `0xD84f…1E76`; (5) `docker compose up`; (6) go only on user's word.
-- **Blockers:** R3 rules unknown. Optional R2 cleanup still open (rotate old wallet H + B keys, they're public).
+## Known Issues — R3 profit agent (NEEDS testnet validation before mainnet)
+- **Execution path unrun against live API.** `agent_v3/maker.py` places real orders; verify on testnet first.
+- **`get_open_orders` / `cancel_order` reliability:** R2 saw `getOwnOpenOrders` return empty. The maker's drift-requote path cancels by id from `get_open_orders` — if that returns nothing, requote can't cancel cleanly (risk of stacked orders). Re-test; if broken, fix the cancel path (docs say it returns data now).
+- **Fill detection threshold:** maker infers fills from wallet USDso delta ≥ 50% of notional. Tune against real partial-fill behavior on testnet.
+- **Native SOMI pair making:** SOMI base is native; quote-side (USDso) delta still detects fills, but base inventory tracking on the native pool is less clean — validate or keep SOMI pair gas-only at first.
+- **Strategist needs server ADC:** Gemini 2.5 Pro via Vertex requires `GOOGLE_CLOUD_PROJECT` + `gcloud auth application-default login` on the server. Falls back to safe deterministic defaults if absent.
+- **Two-sided simultaneous quoting deferred:** v1 uses the proven alternating no-bleed cycle (one resting side at a time — still earns yield). Simultaneous both-sides quoting for extra yield is a future enhancement.
+
+## Resume From Here (2026-06-24 — R3 profit agent built, pre-validation)
+- **Done:** R3 rules saved (`context/plan/round3-rules.md`) + docs delta. Checkpointed R2 to `main` and pushed. New branch `feature/profit-maker-agent`. Archived all R2 code → `backend/archive/` + `ARCHIVE.md`. Built `backend/agent_v3/` (context_store, market_data, inventory, gas, strategist, maker, runner), updated `config.py` for R3, added `gas_min`/`min_gas` 5M-gas passthrough to `dreamdex.py`/`wallet.py`, repointed Dockerfile/compose. All modules import clean.
+- **Next:** (1) `DRY_RUN=1` local dry run to eyeball quoting/logging; (2) testnet live run to validate fill detection + requote/cancel (see Known Issues); (3) tune leg/margin/timers; (4) wire server ADC for Gemini; (5) fund `0xD84f…1E76` with $150; (6) `docker compose up -d` on user's go.
+- **Blockers:** none for building; mainnet launch gated on testnet validation + user go.
+- **Optional R2 cleanup still open:** rotate old wallet H + B keys (repo public); `docker compose down` old R2 container before redeploy.
