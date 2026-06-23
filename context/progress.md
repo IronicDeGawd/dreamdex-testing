@@ -69,6 +69,11 @@
 - **Strategist needs server ADC:** Gemini 2.5 Pro via Vertex requires `GOOGLE_CLOUD_PROJECT` + `gcloud auth application-default login` on the server. Falls back to safe deterministic defaults if absent.
 - **Two-sided simultaneous quoting deferred:** v1 uses the proven alternating no-bleed cycle (one resting side at a time — still earns yield). Simultaneous both-sides quoting for extra yield is a future enhancement.
 
+## Resume From Here (2026-06-24 — READY TO DEPLOY, awaiting user "go")
+- **Green checklist:** engine built + testnet-validated (no stacking, clean shutdown, profitable SOMI+WETH round-trips, cancels fixed). Mainnet wallet `0xD84f…1E76` funded (on-chain: **50 SOMI + 150 USDso**) and registered. ADC verified on server (Vertex enabled, gemini-2.5-pro reachable, project `project-8feccae3-bcae-4254-b60`); strategist robust to transient 429.
+- **To launch (on server `irony@100.80.130.21`, dir `~/dreamdex-agent`, container currently down):** (1) deploy branch `feature/profit-maker-agent`; (2) set `.env`: `DREAMDEX_ENV=mainnet`, `MAINNET_PRIVATE_KEY` (present), `WALLET_ADDRESS=0xD84f…1E76`, `GOOGLE_CLOUD_PROJECT=project-8feccae3-bcae-4254-b60`, `STRATEGIST_ENABLED=true`; (3) `docker compose build && docker compose up -d`; (4) watch logs for strategist ping OK + maker quotes/fills. Server gcloud CLI is absent but NOT needed (google-genai reads the mounted ADC file).
+- **Then watch:** PnL stays ≥0 (multiplier), volume accrues, no >24h idle (DQ). 14-day window.
+
 ## Resume From Here (2026-06-24 — R3 profit agent built, pre-validation)
 - **Done:** R3 rules saved (`context/plan/round3-rules.md`) + docs delta. Checkpointed R2 to `main` and pushed. New branch `feature/profit-maker-agent`. Archived all R2 code → `backend/archive/` + `ARCHIVE.md`. Built `backend/agent_v3/` (context_store, market_data, inventory, gas, strategist, maker, runner), updated `config.py` for R3, added `gas_min`/`min_gas` 5M-gas passthrough to `dreamdex.py`/`wallet.py`, repointed Dockerfile/compose. All modules import clean.
 - **Next:** (1) `DRY_RUN=1` local dry run to eyeball quoting/logging; (2) testnet live run to validate fill detection + requote/cancel (see Known Issues); (3) tune leg/margin/timers; (4) wire server ADC for Gemini; (5) fund `0xD84f…1E76` with $150; (6) `docker compose up -d` on user's go.
