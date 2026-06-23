@@ -29,3 +29,9 @@ venv/
 build/
 *.bin
 *.elf
+
+# Playwright MCP transient artifacts
+.playwright-mcp/
+
+# Local auth screenshots
+dreamdex-docs-auth.png

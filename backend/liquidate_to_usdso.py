@@ -13,7 +13,9 @@ Or inside the container:
   docker exec -e DREAMDEX_ENV=mainnet dreamdex-agent python /app/liquidate_to_usdso.py
 """
 import os, sys, time
+# Support both Docker (/app) and local (backend/) execution
 sys.path.insert(0, "/app")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from web3 import Web3
 from eth_account import Account
