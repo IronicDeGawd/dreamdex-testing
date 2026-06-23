@@ -44,9 +44,44 @@ PRICE_POLL_SECONDS = 30
 LEADERBOARD_POLL   = 300
 PRICE_HISTORY_LEN  = 12
 
-# ── OpenAI ────────────────────────────────────────────────
+# ── OpenAI (R2 legacy — used only by archived agent/brain.py) ─────────────
 OPENAI_API   = "https://api.openai.com/v1"
 OPENAI_MODEL = "gpt-4o-mini"
+
+# ── Gemini strategist (R3) — Vertex AI via Application Default Credentials ─
+# Auth on the server with: gcloud auth application-default login  (NO key in repo).
+# google-genai uses Vertex when GOOGLE_GENAI_USE_VERTEXAI=true + project/location set.
+GEMINI_MODEL          = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+GEMINI_USE_VERTEX     = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "true").lower() == "true"
+GEMINI_PROJECT        = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+GEMINI_LOCATION       = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+STRATEGIST_INTERVAL_S = int(os.environ.get("STRATEGIST_INTERVAL_S", 480))  # ~8 min between LLM calls
+STRATEGIST_ENABLED    = os.environ.get("STRATEGIST_ENABLED", "true").lower() == "true"
+
+# ── R3 Profit-Maker rules ─────────────────────────────────────────────────
+# Scoring is Effective Volume = Raw Volume × (1 + PnL%); a wipe = 0. Profit first.
+STARTING_CAPITAL   = 150.0   # USDso, fixed by rules — no top-ups ever
+RESERVE_USDSO      = float(os.environ.get("RESERVE_USDSO", 20.0))  # held untouched (gas + PnL cushion)
+# Contest-eligible pairs (no stablecoin pairs). USDC.e is intentionally excluded.
+ELIGIBLE_PAIRS     = ["WETH:USDso", "WBTC:USDso", "SOMI:USDso"]
+
+# Two-sided PostOnly quoting
+MAKER_LEG_USD      = float(os.environ.get("MAKER_LEG_USD", 12.0))   # USDso notional per resting leg
+MAKER_MARGIN_TICKS = int(os.environ.get("MAKER_MARGIN_TICKS", 3))   # SELL ≥ BUY + this → no-bleed
+MAKER_SPREAD_K     = float(os.environ.get("MAKER_SPREAD_K", 1.5))   # spread = max(tick_floor, k×vol)
+MAKER_MAX_INV_USD  = float(os.environ.get("MAKER_MAX_INV_USD", 40.0))  # max base inventory before skew-only
+MAKER_POLL_S       = int(os.environ.get("MAKER_POLL_S", 10))        # fill-poll interval
+MAKER_REQUOTE_S    = int(os.environ.get("MAKER_REQUOTE_S", 1200))   # patience before drift re-quote
+MAKER_DRIFT_TICKS  = int(os.environ.get("MAKER_DRIFT_TICKS", 5))    # touch drift that triggers re-quote
+
+# Gas management (50 SOMI given, no refills — convert own USDso for more)
+GAS_RESERVE_SOMI    = float(os.environ.get("GAS_RESERVE_SOMI", 5.0))   # floor before forced refuel
+GAS_REFUEL_USDSO    = float(os.environ.get("GAS_REFUEL_USDSO", 5.0))   # USDso→SOMI per refuel (from working capital)
+SOMI_BUY_GAS_LIMIT  = 5_000_000   # native SOMI buy needs ≥5M gas (docs §7a)
+ERC20_GAS_LIMIT     = 2_000_000   # Somnia ERC20 transfers need 2M
+
+# Liveness: >24h with no on-chain trade = auto-DQ. Force a tick well before that.
+LIVENESS_MAX_IDLE_S = int(os.environ.get("LIVENESS_MAX_IDLE_S", 18 * 3600))  # 18h safety margin
 
 # ── Flask server ──────────────────────────────────────────
 FLASK_HOST = "0.0.0.0"
@@ -60,8 +95,9 @@ FLASK_API_KEY = os.environ.get("FLASK_API_KEY", "")
 # The competition leaderboard lives on mainnet regardless of which network
 # the bot is currently trading on. We pin both the URL and the address that's
 # looked up so testnet runs still surface our mainnet standing.
-LEADERBOARD_URL     = "https://dreamdex-leaderboard-super-cool.vercel.app/api/leaderboard"
-LEADERBOARD_ADDRESS = "0xF4c825F3C2970153d78B407CF190861dd4E2b905"  # mainnet wallet
+# R3 uses a new leaderboard + a fresh registered wallet (rules require zero-TX wallet).
+LEADERBOARD_URL     = os.environ.get("LEADERBOARD_URL", "https://dreamdex-leaderboard-new.vercel.app/api/leaderboard")
+LEADERBOARD_ADDRESS = os.environ.get("WALLET_ADDRESS", "0xD84fE2a2220f0269e3d88dab908ADceb2d691E76")  # R3 wallet
 
 # ═══════════════════════════════════════════════════════════
 # NETWORK-SPECIFIC CONFIG
@@ -74,7 +110,8 @@ if ENV == "mainnet":
     DREAMDEX_HTTP = "https://api.dreamdex.io"
     DREAMDEX_WS   = "wss://api.dreamdex.io/v0/ws/public"
 
-    MY_ADDRESS  = "0xF4c825F3C2970153d78B407CF190861dd4E2b905"  # competition wallet
+    # R3 fresh wallet (zero-TX, registered). Override via WALLET_ADDRESS if rotated.
+    MY_ADDRESS  = os.environ.get("WALLET_ADDRESS", "0xD84fE2a2220f0269e3d88dab908ADceb2d691E76")
     PRIVATE_KEY = os.environ.get("MAINNET_PRIVATE_KEY", "")    # export MAINNET_PRIVATE_KEY=0x...
 
     MARKETS = {
