@@ -56,6 +56,39 @@ def fetch_leaderboard() -> dict | None:
         return None
 
 
+def _fetch_mid(pair: str) -> float | None:
+    try:
+        r = requests.get(f"{config.DREAMDEX_HTTP}/v0/orderbooks",
+                         params={"symbols": pair, "depth": 1}, timeout=12)
+        ob = r.json()["orderbooks"][0]
+        b = float(ob["bids"][0]["price"]); a = float(ob["asks"][0]["price"])
+        return (a + b) / 2
+    except Exception:
+        return None
+
+
+def our_pnl() -> tuple[float, dict]:
+    """Our own PnL vs the $150 start, from the agent's trade accounting:
+    realized (completed round-trips) + unrealized (open inventory at current mid).
+    Independent of the leaderboard's free-USDso-only snapshot. Capital reserved in
+    an unfilled buy is worth its face value, so it contributes 0 here (correct)."""
+    positions, realized = ctx.load_inventory()
+    unreal = 0.0
+    detail = {"realized": realized, "positions": {}}
+    for pair, pos in positions.items():
+        base = pos.get("base", 0.0) or 0.0
+        avg = pos.get("avg_cost", 0.0) or 0.0
+        if base <= 0 or avg <= 0:
+            continue
+        mid = _fetch_mid(pair)
+        if mid:
+            u = (mid - avg) * base
+            unreal += u
+            detail["positions"][pair] = {"base": base, "avg": avg, "mid": mid, "unreal": u}
+    detail["unreal"] = unreal
+    return realized + unreal, detail
+
+
 def our_standing(lb: dict) -> tuple[dict | None, int, int]:
     """Return (our_row, rank_by_effective, total_traders)."""
     traders = lb.get("traders", []) if lb else []
@@ -79,21 +112,24 @@ def chain_balances() -> dict:
     return out
 
 
-def summary_text(row, rank, total, bal) -> str:
+def summary_text(row, rank, total, bal, opnl, odetail) -> str:
     if not row:
         return "📊 <b>DreamDEX R3</b>\nOur wallet not on the leaderboard yet."
-    pnl = row.get("pnl", 0.0)
-    pnl_pct = pnl / config.STARTING_CAPITAL * 100
-    emoji = "🟢" if pnl >= 0 else "🔴"
+    pnl_pct = opnl / config.STARTING_CAPITAL * 100
+    emoji = "🟢" if opnl >= 0 else "🔴"
     somi = f"{bal['somi']:.2f}" if bal["somi"] is not None else "?"
     usdso = f"{bal['usdso']:.2f}" if bal["usdso"] is not None else "?"
+    inv = ""
+    if odetail.get("positions"):
+        inv = "\nInventory: " + ", ".join(
+            f"{p.split(':')[0]} {d['base']:.4g}@{d['avg']:.4g}→{d['mid']:.4g}"
+            for p, d in odetail["positions"].items())
     return (
-        f"📊 <b>DreamDEX R3</b> — rank <b>{rank}/{total}</b>\n"
-        f"{emoji} PnL: <b>{pnl:+.2f}</b> USDso ({pnl_pct:+.1f}%)\n"
-        f"Effective vol: <b>{row.get('volumeEffective', 0):,.0f}</b> "
-        f"(raw {row.get('volumeUsdso', 0):,.0f})\n"
-        f"Fills: {row.get('fills', 0)}  •  Tx: {row.get('txCount', 0)}\n"
-        f"Wallet: {usdso} USDso  •  ⛽ {somi} SOMI\n"
+        f"📊 <b>DreamDEX R3</b> — rank <b>{rank}/{total}</b> (by volume)\n"
+        f"{emoji} <b>Our PnL: {opnl:+.2f}</b> USDso ({pnl_pct:+.1f}%) "
+        f"[real {odetail.get('realized', 0):+.2f} / unreal {odetail.get('unreal', 0):+.2f}]\n"
+        f"Volume: <b>{row.get('volumeUsdso', 0):,.0f}</b> raw  •  Fills: {row.get('fills', 0)}  •  Tx: {row.get('txCount', 0)}\n"
+        f"Wallet: {usdso} USDso  •  ⛽ {somi} SOMI{inv}\n"
         f"Milestones: {int(row.get('volumeUsdso', 0) // MILESTONE_USDSO)} × $25"
     )
 
@@ -107,19 +143,19 @@ def run():
 
     while True:
         lb = fetch_leaderboard()
-        row, rank, total = our_standing(lb)
+        row, rank, total = our_standing(lb)       # leaderboard: volume + rank only
         bal = chain_balances()
+        opnl, odetail = our_pnl()                 # OUR PnL (realized + unrealized vs $150)
         now = time.time()
 
         if row is not None:
             fills = row.get("fills", 0)
             vol = row.get("volumeUsdso", 0)
-            pnl = row.get("pnl", 0.0)
 
             # ── instant alerts ──
             if state["fills"] is not None and fills > state["fills"]:
                 send(f"✅ {fills - state['fills']} new fill(s) — total {fills}. "
-                     f"raw vol {vol:,.0f}, eff vol {row.get('volumeEffective', 0):,.0f}, PnL {pnl:+.2f}")
+                     f"raw vol {vol:,.0f}  •  our PnL {opnl:+.2f} USDso")
                 last_summary = 0.0   # force a fresh summary card this loop
             ms = int(vol // MILESTONE_USDSO)
             if state["milestone"] is not None and ms > state["milestone"]:
@@ -127,9 +163,10 @@ def run():
             if state["rank"] is not None and rank != state["rank"]:
                 arrow = "⬆️" if rank < state["rank"] else "⬇️"
                 send(f"{arrow} Rank {state['rank']} → <b>{rank}</b>/{total}")
-            neg = pnl < 0
+            neg = opnl < -1.0                      # alert only on a real (our-calc) loss
             if state["pnl_neg"] is not None and neg and not state["pnl_neg"]:
-                send(f"⚠️ PnL went negative: {pnl:+.2f} USDso — multiplier now <1×")
+                send(f"⚠️ Our PnL negative: {opnl:+.2f} USDso (real {odetail.get('realized',0):+.2f} / "
+                     f"unreal {odetail.get('unreal',0):+.2f})")
 
             state.update(fills=fills, rank=rank, pnl_neg=neg, milestone=ms)
 
@@ -153,7 +190,7 @@ def run():
 
         # periodic summary
         if now - last_summary >= SUMMARY_S:
-            send(summary_text(row, rank, total, bal))
+            send(summary_text(row, rank, total, bal, opnl, odetail))
             last_summary = now
 
         time.sleep(POLL_S)
