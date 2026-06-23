@@ -275,6 +275,7 @@ class DreamDEX:
         limit_price: float | None = None,
         funding: str = "wallet",
         skip_sim: bool = False,
+        gas_min: int = 0,
     ) -> dict:
         """
         Prepare + sign + broadcast an order.
@@ -495,7 +496,7 @@ class DreamDEX:
             state_before = _read_state()
 
             # Sign + broadcast the order tx
-            tx_hash = self.wallet.send_unsigned_tx(resp)
+            tx_hash = self.wallet.send_unsigned_tx(resp, min_gas=gas_min)
             print(f"[DreamDEX] Order TX sent: {tx_hash}")
             receipt = self.wallet.wait_for_receipt(tx_hash)
 
