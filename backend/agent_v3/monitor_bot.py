@@ -112,6 +112,12 @@ def chain_balances() -> dict:
     return out
 
 
+def _fmt(x) -> str:
+    if x is None:
+        return "?"
+    return f"{x:,.2f}" if abs(x) >= 100 else f"{x:.4f}"
+
+
 def summary_text(row, rank, total, bal, opnl, odetail) -> str:
     if not row:
         return "📊 <b>DreamDEX R3</b>\nOur wallet not on the leaderboard yet."
@@ -119,19 +125,28 @@ def summary_text(row, rank, total, bal, opnl, odetail) -> str:
     emoji = "🟢" if opnl >= 0 else "🔴"
     somi = f"{bal['somi']:.2f}" if bal["somi"] is not None else "?"
     usdso = f"{bal['usdso']:.2f}" if bal["usdso"] is not None else "?"
-    inv = ""
+    vol = row.get("volumeUsdso", 0)
+
+    lines = [
+        "📊 <b>DreamDEX R3</b>",
+        "",
+        f"🏆 Rank: <b>{rank}/{total}</b> (by volume)",
+        f"📈 Volume: <b>{vol:,.0f}</b> USDso",
+        f"🎯 Milestones: {int(vol // MILESTONE_USDSO)} × $25",
+        "",
+        f"{emoji} <b>PnL (our calc): {opnl:+.2f} USDso</b> ({pnl_pct:+.1f}%)",
+        f"     ├ realized:   {odetail.get('realized', 0):+.2f}",
+        f"     └ unrealized: {odetail.get('unreal', 0):+.2f}",
+        "",
+        f"🔄 Fills: {row.get('fills', 0)}     🧾 Tx: {row.get('txCount', 0)}",
+        f"👛 USDso: {usdso}     ⛽ SOMI: {somi}",
+    ]
     if odetail.get("positions"):
-        inv = "\nInventory: " + ", ".join(
-            f"{p.split(':')[0]} {d['base']:.4g}@{d['avg']:.4g}→{d['mid']:.4g}"
-            for p, d in odetail["positions"].items())
-    return (
-        f"📊 <b>DreamDEX R3</b> — rank <b>{rank}/{total}</b> (by volume)\n"
-        f"{emoji} <b>Our PnL: {opnl:+.2f}</b> USDso ({pnl_pct:+.1f}%) "
-        f"[real {odetail.get('realized', 0):+.2f} / unreal {odetail.get('unreal', 0):+.2f}]\n"
-        f"Volume: <b>{row.get('volumeUsdso', 0):,.0f}</b> raw  •  Fills: {row.get('fills', 0)}  •  Tx: {row.get('txCount', 0)}\n"
-        f"Wallet: {usdso} USDso  •  ⛽ {somi} SOMI{inv}\n"
-        f"Milestones: {int(row.get('volumeUsdso', 0) // MILESTONE_USDSO)} × $25"
-    )
+        lines.append("")
+        lines.append("📦 Inventory:")
+        for p, d in odetail["positions"].items():
+            lines.append(f"     • {p.split(':')[0]}: {d['base']:g} @ {_fmt(d['avg'])} → {_fmt(d['mid'])}")
+    return "\n".join(lines)
 
 
 def run():
