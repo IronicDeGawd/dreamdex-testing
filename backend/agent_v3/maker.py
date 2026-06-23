@@ -42,6 +42,17 @@ class PairMaker:
         except Exception:
             return 0.0
 
+    def _base_balance(self) -> float:
+        """Wallet balance of the pair's base token (native for SOMI, else ERC-20).
+        Used as the buy-fill signal — base only arrives on a real fill."""
+        mkt = config.MARKETS.get(self.pair, {})
+        try:
+            if mkt.get("native"):
+                return self.dex.wallet.native_balance()
+            return self.dex.wallet.erc20_balance(mkt["base"], int(mkt.get("baseDecimals", 18)))
+        except Exception:
+            return 0.0
+
     @staticmethod
     def _snap_px(px: float, tick: float) -> float:
         if not tick:
@@ -197,7 +208,13 @@ class PairMaker:
         partial fills can never stack.
         """
         self._cancel_open()                       # clear anything resting first
-        usdso0 = self._usdso()
+        # Baseline the asset we RECEIVE on a fill — NOT the one we reserve. A
+        # wallet-funded buy debits (reserves) USDso at placement, so watching
+        # USDso would false-positive; the base token only arrives on a real fill.
+        if side == "buy":
+            recv0 = self._base_balance()
+        else:
+            recv0 = self._usdso()
         # Native pools (SOMI) need the >=5M gas floor for the payout guard.
         gas_min = config.SOMI_BUY_GAS_LIMIT if config.MARKETS.get(self.pair, {}).get("native") else 0
         res = self.dex.place_order(self.pair, side, qty, order_type="postonly",
@@ -212,8 +229,9 @@ class PairMaker:
         deadline = time.time() + config.MAKER_REQUOTE_S
 
         def _filled() -> float:
-            moved = (usdso0 - self._usdso()) if side == "buy" else (self._usdso() - usdso0)
-            return max(0.0, moved / px) if px else 0.0
+            if side == "buy":
+                return max(0.0, self._base_balance() - recv0)        # base received
+            return max(0.0, (self._usdso() - recv0) / px) if px else 0.0  # base sold
 
         while not self.stop.is_set():
             self.stop.wait(config.MAKER_POLL_S)
