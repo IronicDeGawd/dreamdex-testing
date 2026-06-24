@@ -1,85 +1,48 @@
-# Handover — auto-generated 2026-06-23 23:40
+# Handover — auto-generated 2026-06-24 08:04
 
 > Git facts written by pre-compact-handover.sh. Session Notes are Claude-owned.
 > See context/progress.md and context/structure.md for full state.
 
 ## Branch
-main
+feature/profit-maker-agent
 
 ## Files In Flight
 ```
- M backend/liquidate_to_usdso.py
- M backend/profit_maker.py
- M backend/run_direct_burst.sh
- M context/handover.md
- M context/progress.md
  M context/structure.md
-?? .playwright-mcp/
-?? backend/aware_burst.py
-?? backend/aware_burst_vault.py
-?? backend/aware_keepalive.sh
-?? backend/aware_vault_keepalive.sh
-?? backend/cancel_all.py
-?? backend/cancel_order.py
-?? backend/cycle_phase.sh
-?? backend/deep_check.py
-?? backend/deep_watch.py
-?? backend/end_burst.sh
-?? backend/fix_burst.sh
-?? backend/fix_flatten.sh
-?? backend/gas_autokeep.sh
-?? backend/maker_keepalive.sh
-?? backend/probe2.py
-?? backend/probe_funding.py
-?? backend/probe_realbal.py
-?? backend/probe_trades.py
-?? backend/reset_maker.sh
-?? backend/reset_maker_weth.sh
-?? backend/sell_somi.py
-?? backend/somi_drip.sh
-?? backend/stop_and_recover.sh
-?? backend/sweep_b_to_h.py
-?? backend/sweep_opponents.py
-?? backend/switch_pair.sh
-?? context/dreamdex-native-pool-revert-bug.docx
-?? context/dreamdex-taker-revert-bug.docx
-?? context/dreamdex-taker-revert-bug.md
-?? context/plan/
-?? context/progress.archive.md
-?? context/research/
-?? dreamdex-docs-auth.png
+?? backend/data/agent_ttest.db
+?? backend/data/agent_ttest2.db
 ```
 
 ## Recent Commits
 ```
-ea9d497 feat(burst): gas top-up utility + $45 legs
-90bc144 feat(profit): no-bleed maker bot + wallet/dreamdex key override
-a8e8454 chore(burst): round-2 launch config — USDC.e $40 legs, key off process list
-b4c537a fix(burst): elastic leg sizing to prevent fixed-leg inventory deadlock
-519496a feat(burst): async tx logging to sqlite + batch writer + status reconcile
+9be5c55 tune(maker): leg $65, SOMI inventory cap $90
+28b2894 feat: start/stop control + flatten-to-USDso + $100 auto-stop
+6d226ad docs: add .env.example for the V3 profit-maker approach
+c81ba68 style(monitor): rename feed to DreamDEX V3, market preview every 2h
+879ecc3 feat(monitor): relay Gemini reasoning + market preview; tidy summary
 ```
 
 ## Session Notes
-**ROUND 3 — SETUP (rules not yet received). Round 2 WON #1 (final 1,342,945, +33,177).** Nothing running. Do NOT start engine until R3 rules read AND user says go. Repo PUBLIC. Full state in `context/progress.md`; mechanics in `context/research/dreamdex.md`.
+**🟢 V3 profit-maker is LIVE on mainnet.** Bounded two-sided market maker. Full state + known issues + deploy notes in `context/progress.md` (LIVE section). R2 burst code archived in `backend/archive/` (`ARCHIVE.md`).
 
-### DONE this session
-- **New R3 wallet created** (rules require fresh wallet). Deposit address: **`0xD84fE2a2220f0269e3d88dab908ADceb2d691E76`**. Key on server `~/dreamdex-agent/.env` as `MAINNET_PRIVATE_KEY` (piped over SSH stdin, hash-verified == generated). Local copy: session scratchpad `round3_wallet.txt` (TEMP — move to durable store before session ends). R2 `.env` backed up → `.env.r2bak`.
-- Compacted `progress.md` (R2 verbose log → `progress.archive.md`); kept all findings. Stored findings into knowledge base `context/research/dreamdex.md`.
+### Deployment (server `irony@100.80.130.21`)
+- Dir is **`~/dreamdex-r3`** (old `~/dreamdex-agent` REMOVED). Branch `feature/profit-maker-agent`. Containers: `dreamdex-agent` + `dreamdex-monitor`.
+- Redeploy: `cd ~/dreamdex-r3 && git pull -q origin feature/profit-maker-agent && cd backend && docker compose up -d --build [agent|monitor]`. Config baked into image → **rebuild needed for code/config changes**; monitor-only changes → `--build monitor` (agent untouched).
+- SSH: `ssh -o ControlPath=none -o ConnectTimeout=30 -o BatchMode=yes irony@100.80.130.21 '<short cmd>'`.
+- Wallet `0xD84fE2a2220f0269e3d88dab908ADceb2d691E76` (registered, funded 150 USDso + 50 SOMI). Key in `~/dreamdex-r3/backend/.env` `MAINNET_PRIVATE_KEY`; verified derives the wallet.
 
-### 🌟 CORRECTED FINDING (this session) — gas self-funding IS possible
-- Earlier "gas self-conversion DEAD" was WRONG. `0x782b2567` = `InsufficientGasForPayout(uint256 gasLeft)` — deliberate guard, not a bug. `placeOrder` BUY on SOMI:USDso (`isBid=true`, `msg.value=0`) WORKS with **`gas≥5,000,000`** (we used 3M → too low for native-payout headroom). Sim lied because it used different gas than broadcast → **simulate with the SAME gas you broadcast.** (Dev `emrey.somi` 2026-06-22, now in DreamDEX docs.) ⟹ wire USDso→SOMI auto-top-up into R3 engine. Detail: `dreamdex.md` §7a.
-- ⚠️ `context/dreamdex-native-pool-revert-bug.docx` is now OBSOLETE (claimed a contract bug; was a gas-limit issue). Awaiting user decision: delete or annotate RESOLVED.
+### Strategy / config (live)
+- Pairs **SOMI 80% / WBTC 20%** (WETH dropped — 1.4bps too tight). Leg **$65**, inv cap **SOMI $90 / WBTC $22**, reserve $20, margin 1 tick (sell ≥ cost+margin = no realized loss). SOMI ~10bps is the only capturable spread.
+- Strategist: **Gemini 2.5 Pro via Vertex ADC** (project `project-8feccae3-bcae-4254-b60`, ADC file mounted `/app/adc.json` from host `~/.config/gcloud/...`; gcloud CLI NOT needed at runtime).
+- Telegram (token+chat in .env): **/stop** (flatten to USDso + idle), **/start**, **/status**. Auto-stop if total value < **$100**. Monitor computes OUR PnL (realized+unrealized vs $150); leaderboard used ONLY for vol/rank.
 
-### ⚠️ REMAINING R2 CLEANUP (optional, not done)
-- ROTATE old keys (repo PUBLIC, treat as burned): wallet H `0xF4c825F3C2970153d78B407CF190861dd4E2b905`, wallet B `0x7571…A638`.
-- `docker compose down` old container if not reusing as-is (server `irony@100.80.130.21`, `/home/irony/dreamdex-agent`).
+### Current live state (at handover)
+- Rank ~2/6, realized PnL **+0.15**, holding ~$40 SOMI inventory (small unrealized −), gas ~49.9 SOMI. PnL ~flat = winning profile (beat the bleeders; trader-3 bled to −$108).
 
-### KEY ENGINE FACTS (preserve)
-- **Win move:** `aware_burst_vault.py` builds placeOrder calldata locally + direct RPC broadcast (env `BURST_CONFIRMED` unset=FAST ~10k/hr; =1=slow API+verify ~3k/hr). DreamDEX order-build API added ~14s/leg. 5gwei priority tip in `wallet.py _gas_fields` (Somnia default tip 0 → txs queue).
-- Capital dev-allocated (~100 USDso fixed) → contest = most volume per fixed capital (efficiency).
-- Engine can be ALIVE-BUT-STUCK (price-buffer hiccup → no fills) — monitor VOLUME, not just process-alive.
-
-### GOTCHAS
-- SSH/Tailscale can drop → `-o ControlPath=none`, SHORT cmds, retry 5×. Balance reads via public RPC `https://api.infra.mainnet.somnia.network/` need no SSH.
-- Host-path `grep` inside `docker exec` fails (host dir not in container) — run host greps outside docker exec.
-- ERC20 transfers on Somnia need `gas=2,000,000` (default ~200k silently reverts, can strand funds).
+### GOTCHAS (V3-specific, hard-won this session)
+- **Native SOMI pool place AND cancel need gas LIMIT ≥5M** (InsufficientGasForPayout guard; actual use tiny) — handled via `gas_min`/`min_gas`. ERC20-payout (USDso) ops fine at 3M.
+- **Fill detection:** wallet-funded order RESERVES funding token at placement (looks like a fill on balance delta). Detect BUY fill by BASE received, SELL by USDso received; two-sided uses `get_open_orders` `remaining` (reservation ≠ fill).
+- `cancel_order` now verifies receipt (was reporting false "cancelled" while tx reverted → stuck orders).
+- Leaderboard `pnl` = free USDso − 150 only (ignores open orders + inventory → phantom loss). Ignore it.
+- Local: `.venv` at `backend/.venv`; **bash cwd resets to repo root between calls → use absolute paths or `cd` inside the command**.
+- Stray untracked test DBs `backend/data/agent_ttest*.db` — safe to delete.

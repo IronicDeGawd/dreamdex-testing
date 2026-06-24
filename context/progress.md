@@ -1,14 +1,11 @@
 # Progress — DreamDEX Contest Agent (Round 3)
 
-**STATUS 2026-06-24: ROUND 3 — RULES IN, REWRITING AS PROFIT AGENT.** R2 WON #1. Fresh wallet created. **R3 rules received** (`context/plan/round3-rules.md`). **Scoring inverted: ranked by Effective Volume = Raw Volume × (1 + PnL%)** → profit now matters as much as turnover; a wipe = 0. 14 days, $150 start, no top-ups, 50 SOMI gas (convert USDso for more), eligible pairs BTC/ETH/SOMI vs USDso (no stablecoin), **>24h idle = DQ**. New profit lever: maker yield ~3.3% APY weighted by proximity-to-mid, both sides must rest. Decision: **abandon the volume-burst playbook, build a fresh profitable market-making AGENT** on a new branch; archive all R2 code. Nothing running. Do NOT start the engine until built, funded, and user says go.
+**STATUS 2026-06-24: 🟢 V3 PROFIT-MAKER LIVE ON MAINNET.** R2 WON #1. R3 scoring = Effective Volume = Raw × (1 + PnL%); wipe = 0; 14 days, $150 start, no top-ups, 50 SOMI gas, eligible BTC/ETH/SOMI (no stablecoin), >24h idle = DQ. Built + testnet-validated + deployed a **bounded two-sided market maker** (SOMI 80% / WBTC 20%, leg $65, inv cap SOMI $90 / WBTC $22, reserve $20, no realized loss, Gemini 2.5 Pro strategist, Telegram monitor with /start /stop /status + $100 auto-stop). Rank ~2/6, realized PnL +0.15, PnL ~flat (winning profile). **Live state + deploy in the "LIVE ON MAINNET" section below.** Maker yield is negligible at our size (~$0.16/2wk) — profit comes from spread capture; leaderboard `pnl` is free-USDso-only (ignore it, we compute our own).
 
 > **📖 Full verified DreamDEX mechanics/economics/slippage/fill-rate reference: `context/research/dreamdex.md`** (zero pool fees; toll ~$0.09–0.10/1k; ceiling = capital×~10k; slip=50 → ~100% fill). **Re-verify these still hold in R3 before relying on them.**
 
-## Round 3 setup (current)
-- **New wallet (R3 deposit address):** `0xD84fE2a2220f0269e3d88dab908ADceb2d691E76`. Private key on server `~/dreamdex-agent/.env` as `MAINNET_PRIVATE_KEY` (piped over SSH stdin — never on host process list/history; hash-verified == generated key). Local copy in session scratchpad `round3_wallet.txt` (temporary — move to durable store before session ends).
-- **R2 `.env` backed up** to `~/dreamdex-agent/.env.r2bak` (old wallet H key preserved there).
-- **Server:** `irony@100.80.130.21`, dir `/home/irony/dreamdex-agent`. Container `dreamdex-agent` currently DOWN (R2 cleanup).
-- **Pending:** receive R3 rules → decide strategy → confirm engine still valid → fund the new address → `docker compose up` → go.
+## Round 3 setup → SUPERSEDED (now live — see "🟢 LIVE ON MAINNET" below)
+- Wallet `0xD84fE2a2220f0269e3d88dab908ADceb2d691E76` (registered, funded). Key on server `~/dreamdex-r3/backend/.env` as `MAINNET_PRIVATE_KEY`. R2 `.env` backed up `~/dreamdex-agent/.env.r2bak` (dir since removed — backup was pre-removal).
 
 ## Round 2 outcome (rollup — full log in `context/progress.archive.md`)
 - **🏆 WON #1.** Final 1,342,945, lead +33,177 over t3 (ended 10:00 UTC Mon 2026-06-22). PnL −93 (most efficient of top 3). Crossed 1M with a full taker burst (the old "100-USDso hard cap / 1M unreachable / maker-only" plan was WRONG — see archive).
@@ -62,16 +59,28 @@
 - **Profitable no-bleed round-trips on SOMI AND WETH** (e.g. buy 0.1009 → sell 0.101 = +0.000495 USDso; WETH 0.001 filled).
 - Fill detection (full + partial), inventory persistence across restart, multi-pair concurrency — all confirmed.
 
-## Known Issues — R3 profit agent
-- **Pre-mainnet remaining:** (1) wire server ADC for Gemini (`gcloud auth application-default login` + `GOOGLE_CLOUD_PROJECT`); (2) confirm WBTC ($6.23 min) fills with the $12 leg on mainnet (WETH+SOMI validated); (3) edge: a gas-refuel (USDso→SOMI) during a BUY wait could be misread as a buy fill via USDso delta — refuel is rare (only when SOMI<reserve), but isolate it later; (4) fund $150 + register wallet on the new leaderboard before Day 1.
-- **Testnet wallet state:** low USDso + holding some STT from validation. Top up / liquidate before further testnet rounds.
-- **Native SOMI pair making:** SOMI base is native; quote-side (USDso) delta still detects fills, but base inventory tracking on the native pool is less clean — validate or keep SOMI pair gas-only at first.
-- **Strategist needs server ADC:** Gemini 2.5 Pro via Vertex requires `GOOGLE_CLOUD_PROJECT` + `gcloud auth application-default login` on the server. Falls back to safe deterministic defaults if absent.
-- **Two-sided simultaneous quoting deferred:** v1 uses the proven alternating no-bleed cycle (one resting side at a time — still earns yield). Simultaneous both-sides quoting for extra yield is a future enhancement.
+## Known Issues — R3 profit agent (open)
+- **Inventory accumulation on a one-way move:** as a maker we buy at bid, so a sustained SOMI downtrend accumulates inventory to the cap; no-bleed means we hold (don't realize the loss) until recovery. Bounded by the $90 cap + $100 auto-stop. Watch unrealized; it should oscillate, not slide.
+- **Gas-refuel vs fill edge:** a USDso→SOMI refuel during an open buy could perturb accounting; rare now (SOMI balance ≫ reserve). Isolate later if it ever triggers.
+- **Resolved this session:** two-sided MM built (was deferred); ADC/Gemini wired + verified; native-pool 5M-gas cancels fixed + receipt-verified; buy-fill detection by base received (not USDso reservation); lot-precision 400s; phantom fills; monitor shows our-own PnL.
 
 ## 🟢 LIVE ON MAINNET (2026-06-24)
-- Two-sided MM deployed on server `~/dreamdex-r3` (containers `dreamdex-agent` + `dreamdex-monitor`, `feature/profit-maker-agent`). Strategist (Gemini 2.5 Pro via ADC) active, Telegram alerts delivering. Verified correct: SOMI resting bid + WBTC profit-sell, no stacking, no live errors, capital ~$150 accounted (free + bid reservation + WBTC inventory), 49.9 SOMI gas. Key-derives-wallet safety check passed pre-launch.
-- Deploy notes: server `~/dreamdex-agent` is gone (old R2 removed); new dir `~/dreamdex-r3`. Redeploy = `cd ~/dreamdex-r3 && git pull && cd backend && docker compose up -d --build`. Clear `inventory_state`/`agent_state` if restarting after a desync. ADC file mounted from host into container.
+**Deployment**
+- Server `irony@100.80.130.21`, dir **`~/dreamdex-r3`** (old `~/dreamdex-agent` REMOVED), branch `feature/profit-maker-agent`. Containers `dreamdex-agent` + `dreamdex-monitor`.
+- Redeploy: `cd ~/dreamdex-r3 && git pull -q origin feature/profit-maker-agent && cd backend && docker compose up -d --build [agent|monitor]`. Config baked into image → rebuild for code/config changes; monitor-only change → `--build monitor` (agent untouched). Clear `inventory_state`/`agent_state` in agent.db if restart desyncs.
+- Wallet `0xD84f…1E76` funded 150 USDso + 50 SOMI, registered. Key derives wallet (verified). ADC file mounted host→`/app/adc.json`; project `project-8feccae3-bcae-4254-b60`; Vertex enabled, 2.5-pro reachable.
+
+**Live config (current)**
+- Pairs SOMI 80% / WBTC 20% (WETH dropped, 1.4bps too tight). Leg **$65**, inv cap SOMI **$90** / WBTC **$22**, reserve $20, margin 1 tick (sell ≥ cost+margin). SOMI ~10bps is the capturable spread.
+- Strategist Gemini 2.5 Pro every ~8 min (rationale relayed to Telegram). Monitor: summary every 10 min + on fills, market preview every 2h, /start /stop /status, auto-stop < $100. Monitor computes OUR PnL (realized+unrealized vs 150); leaderboard only for vol/rank.
+
+**Latest state** rank ~2/6, realized +0.15, holding ~$40 SOMI inventory (small unrealized −, oscillates), gas ~49.9 SOMI. Verified: two-sided no stacking, fills via `get_open_orders.remaining`, no live errors.
+
+**Open items / next**
+- Watch realized PnL trend up + unrealized staying a small oscillation (not a one-way slide). Bigger legs ($65) amplify both — re-tune via `MAKER_LEG_USD`/`MAKER_MAX_INV_USD` if drawdown grows.
+- Edge: a gas-refuel during a buy wait could be misread — refuel is rare (SOMI ≫ reserve now); isolate later.
+- Stray untracked test DBs `backend/data/agent_ttest*.db` — safe to delete.
+- Repo must be shared at program end (rules) — it's public; `.env` never committed (`.env.example` documents vars).
 
 ## Strategy pivot → two-sided market making (2026-06-24)
 - Recon: **no house MM** in docs — the tight book is a competitor MM (likely trader-3, who bled to −$108 PnL via taking → effective vol crushed to 7.7k). Live spreads: WETH ~1.4bps, WBTC ~2bps, **SOMI ~10bps (only one worth capturing)**. Yield at our size ≈ $0.16/2wk → negligible; profit must come from spread capture.

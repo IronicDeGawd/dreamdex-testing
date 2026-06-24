@@ -4,37 +4,40 @@
 
 ```
 .
-├── backend/                         # Agent trading engine (Python + Flask)
-│   ├── agent/
+├── backend/                         # Agent trading engine (Python + Flask, Round 3 restructure)
+│   ├── agent_v3/                    # R3 profit maker (active)
 │   │   ├── __init__.py
-│   │   ├── agent.py                 # TradingAgent main loop + state machine
-│   │   ├── brain.py                 # GPT-4o-mini trading logic (GRIND/PROFIT modes)
-│   │   ├── state.py                 # Trade state enum (placed/filled/unfilled)
-│   │   └── strategy.py              # Trading strategy (momentum, thresholds)
-│   ├── monitor/
+│   │   ├── runner.py                # Entrypoint: threaded supervisor, multi-pair cycling
+│   │   ├── maker.py                 # Per-pair no-bleed PostOnly cycle logic
+│   │   ├── market_data.py           # Book snapshots, mid-prices, spreads, volatility
+│   │   ├── inventory.py             # Position tracking, PnL, reserve enforcement
+│   │   ├── gas.py                   # SOMI refuel automation
+│   │   ├── strategist.py            # Gemini 2.5 Pro via Vertex ADC (trade context)
+│   │   └── context_store.py         # Rich trade-context SQLite store
+│   ├── archive/                     # R2 reference code (deprecated, do not run)
+│   │   ├── agent_r2/                # Old R2 agent/ package
+│   │   ├── ARCHIVE.md               # R2 runbook index + legacy script reference
+│   │   └── [R2 scripts moved here]  # aware_burst*.py/.sh, burst_*, *keepalive.sh, probe*.py, sweep_*.py, etc.
+│   ├── trading/                     # Shared utilities (R3 live)
 │   │   ├── __init__.py
-│   │   ├── db.py                    # SQLite persistence: trades, market_ticks, stats helpers
-│   │   ├── leaderboard.py           # LeaderboardMonitor (shared across server + agent)
-│   │   ├── portfolio.py             # Portfolio (reads pool balances via web3.py)
-│   │   └── prices.py                # Price fetcher (dreamDEX pools)
-│   ├── main.py                      # Entry point: spawn agent loop + leaderboard monitor
-│   ├── server.py                    # Flask API (SIWE auth, /api/order, /api/status)
-│   ├── config.py                    # Constants: MARKETS, pool addrs, decimals, thresholds
-│   ├── data/                        # SQLite DB volume (agent.db, persists across restarts)
+│   │   ├── wallet.py                # Web3 account + signing
+│   │   ├── dreamdex.py              # Pool calldata + fill tracking
+│   │   └── manual.py                # Manual order + mock
+│   ├── monitor/                     # Monitoring (R3 live)
+│   │   ├── __init__.py
+│   │   ├── db.py                    # SQLite persistence: trades, context, stats
+│   │   ├── leaderboard.py           # LeaderboardMonitor: shared rank + balance polling
+│   │   ├── portfolio.py             # Vault + wallet snapshot (quote, base, native)
+│   │   └── prices.py                # Pool mid-prices + sparklines
+│   ├── config.py                    # Constants: MARKETS, pool addrs, R3 thresholds
+│   ├── data/                        # SQLite volumes (agent.db, context.db, logs)
 │   │   └── .gitkeep
-│   ├── Dockerfile                   # Docker image (Python 3.11, web3.py, openai)
+│   ├── Dockerfile                   # Docker image (Python 3.11, web3.py, vertex SDK)
 │   ├── docker-compose.yml           # Compose config (network_mode: host, .env secrets)
-│   ├── requirements.txt              # pip dependencies
-│   ├── .env                         # Secrets: FLASK_API_KEY, RPC_URL, OPENAI_KEY (not in git)
-│   ├── buy_gas.py                   # Swap USDso→SOMI on SOMI pool to refuel gas agent
-│   ├── check_balance.py             # Utility: read wallet balance snapshot
-│   ├── gas_topup.sh                 # Drop-safe orchestration: disable keepalive → kill burst → buy gas → restart
-│   ├── smoke_testnet.py             # End-to-end test on testnet
-│   ├── smoke_live_order.py          # Test live order (mainnet)
-│   ├── test_connectivity.py         # Network diagnostics
-│   ├── burst_keepalive.sh           # Host cron (every 2 min): detect stalls via pgrep, restart if dead
-│   ├── run_direct_burst.sh          # Direct-RPC burst engine: defaults USDC.e:USDso, reads key from container env
-│   ├── logs/                        # Agent + server logs (local only)
+│   ├── requirements.txt              # pip dependencies (vertex-ai, openai via vertex)
+│   ├── .env                         # Secrets: VERTEX_PROJECT, VERTEX_REGION, RPC_URL, etc. (not in git)
+│   ├── README.md                    # R3 architecture + quick-start
+│   ├── logs/                        # Agent logs (local only)
 │   ├── pyrightconfig.json           # Type checking config
 │   └── .venv/                       # Virtual environment (git-ignored)
 │
@@ -63,47 +66,54 @@
 
 ## Entry Points
 
-- **Backend agent:** `backend/main.py` — spawns TradingAgent loop + LeaderboardMonitor
-- **Flask server:** `backend/server.py` — SIWE auth + order API
-- **Watch:** `firmware/watch.ino` — ESP32-C3 main sketch
+- **R3 profit maker:** `backend/agent_v3/runner.py` — multi-pair cycling supervisor (no Flask)
+- **R2 reference:** `backend/archive/ARCHIVE.md` — legacy script index (do not run directly)
+- **Watch:** `firmware/watch.ino` — ESP32-C3 main sketch (unchanged)
 
 ## Config Files
 
-- **`backend/config.py`** — Constants: MARKETS (pool decimals, minQty, lot, tick), thresholds (floor $22, max trade $5), mode settings (GRIND/PROFIT), momentum threshold ±0.3%
-- **`backend/.env`** — Runtime secrets: FLASK_API_KEY, RPC_URL (Somnia chain), OPENAI_KEY, DREAMDEX_ENV (testnet/mainnet)
-- **`firmware/wifi_secrets.h`** — WiFi credentials + API_KEY (mirrors backend FLASK_API_KEY)
-- **`backend/docker-compose.yml`** — Container config: network_mode=host, env-file=.env
+- **`backend/config.py`** — Constants: MARKETS, pool addrs, pair rotation, reserve thresholds, no-bleed PostOnly cycle params
+- **`backend/.env`** — Runtime secrets: VERTEX_PROJECT, VERTEX_REGION, RPC_URL (Somnia), DREAMDEX_ENV (testnet/mainnet), wallet keys (not in git)
+- **`firmware/wifi_secrets.h`** — WiFi credentials + API_KEY (removed: no backend server in R3)
+- **`backend/docker-compose.yml`** — Container config: network_mode=host, .env secrets, agent_v3/runner.py as entrypoint
+- **`context/plan/round3-rules.md`** — R3 operational rules: capital limits, pair order, gas auto-refuel, context logging
 
-## Key Modules
+## Key Modules (R3)
 
 | File | Purpose |
 |------|---------|
-| `agent/agent.py` | TradingAgent main loop, trade placement, vault-delta fill detection |
-| `agent/brain.py` | GPT-4o-mini strategy (momentum, allocation, mode logic) |
-| `agent/strategy.py` | Market analysis, momentum calc, buy/sell signals |
-| `monitor/leaderboard.py` | Shared LeaderboardMonitor: fetches rank, auto-polls every 60s |
-| `monitor/portfolio.py` | Vault + wallet balance snapshot (quote, base, native) |
-| `monitor/prices.py` | dreamDEX pool mid-prices + sparklines |
-| `server.py` | Flask routes: /api/order, /api/status, /api/portfolio, /auth/siwe |
+| `agent_v3/runner.py` | Entrypoint: multi-pair supervisor, threaded cycle manager, context store writer |
+| `agent_v3/maker.py` | Per-pair no-bleed PostOnly cycle: book snap → reserve check → limit order logic |
+| `agent_v3/market_data.py` | Book fetcher, mid-price calc, spread calc, volatility signals |
+| `agent_v3/inventory.py` | Position tracking, realized/unrealized PnL, reserve enforcement, sweep logic |
+| `agent_v3/strategist.py` | Gemini 2.5 Pro via Vertex ADC: trade context summarizer + decision helper |
+| `agent_v3/context_store.py` | SQLite schema + helpers: rich trade log with book state, mid, reserve, decision |
+| `monitor/leaderboard.py` | LeaderboardMonitor: shared across all agents, rank + balance polling |
+| `monitor/portfolio.py` | Vault + wallet snapshot (quote, base, native, collateral) |
+| `monitor/prices.py` | dreamDEX pool mid-prices + sparklines (shared across agents) |
+| `trading/dreamdex.py` | Pool calldata encoding, tx submission, fill tracking (Solana devnet/mainnet) |
+| `trading/wallet.py` | Web3.py account + signing, balance reads, native SOL reserves |
 
-## Critical Hidden Details
+## Critical Hidden Details (R3)
 
-- **`.env` not in git.** Contains FLASK_API_KEY, RPC_URL, OPENAI_KEY. Local dev must populate.
-- **`wifi_secrets.h` not in git.** WiFi SSID/password + #define API_KEY (copy of FLASK_API_KEY).
-- **Placeholder values in code.** After git-filter-repo redaction: `<FLASK_API_KEY>`, `<SERVER_HOST>`, `<TUNNEL_HOST>`, `<EXAMPLE_DOMAIN>` need real values for local dev.
-- **LeaderboardMonitor is shared.** Instantiated in `main.py`, passed to TradingAgent. If agent creates its own, rank checks fail silently.
-- **Auto-drain post-sell.** After profitable sells, `agent.py` withdraws vault quote to wallet to prevent runway bleed (vault PnL is counted separately on leaderboard).
+- **`.env` not in git.** Contains VERTEX_PROJECT, VERTEX_REGION, RPC_URL (Somnia), DREAMDEX_ENV, wallet keys (from vault / KMS).
+- **No Flask / server.py in R3.** Agent runs headless in container; watch UI removed from scope.
+- **agent_v3/runner.py is the only entrypoint.** Spawns pair-cycling threads; do not import/call agent_v3 modules directly.
+- **LeaderboardMonitor is shared singleton.** Instantiated once at runner start, passed to all market_data instances. Polling every 60s.
+- **Context store (context_store.py) is append-only SQLite.** Every cycle logs full book state, mid, inventory, reserve, decision. Used for post-trade audits + strategist context.
+- **No vault auto-drain.** R3 focuses on no-bleed PostOnly: keeps capital locked in vault per pair, cycles between pairs, never withdraws mid-round unless user manual intervention.
+- **Gas auto-refuel in gas.py.** If native SOL reserve drops below threshold, gas.py detects and triggers SOMI→USDso→native swap via strategist guidance.
 
-## Docker / Deployment
+## Docker / Deployment (R3)
 
-- **Build & run:** `cd backend && docker-compose up --build`
-- **Network mode:** `host` (required on Ubuntu 24.04 for port-forwarding to work)
-- **Logs:** Streamed to stdout + written to `backend/logs/`
-- **Environment:** Read from `.env` at container start
+- **Build & run:** `cd backend && docker-compose up --build` → starts agent_v3/runner.py as entrypoint
+- **Network mode:** `host` (required for Somnia RPC + DreamDEX interaction)
+- **Logs:** Streamed to stdout + written to `backend/logs/`, context store to `backend/data/context.db`
+- **Environment:** Read from `.env` at container start (no Flask port needed; only RPC + Vertex ADC)
 
-## Testing & Diagnostics
+## Testing & Diagnostics (R3)
 
-- **Smoke tests:** `smoke_testnet.py` (full cycle on testnet), `smoke_live_order.py` (real mainnet order)
-- **Connectivity:** `test_connectivity.py` (RPC + API health)
-- **Firmware diagnostics:** `button_check.ino`, `screen_check.ino` in subdirectories
+- **R2 reference scripts:** `backend/archive/` contains old smoke tests, diagnostics (do not run against mainnet capital)
+- **R3 validation:** See `context/plan/round3-rules.md` for pre-launch checklist (book snapshot, gas reserve, pair cycling, context logging)
+- **Manual testing:** Use testnet USDC.e:USDso pair with small amounts before mainnet flip
 
