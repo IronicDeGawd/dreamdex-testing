@@ -259,11 +259,21 @@ class PairMaker:
         mid = snap.get("mid") or 0.0
         if inv_base <= minq or avg <= 0 or mid <= 0 or mid > avg * (1 - pct):
             return False
+        # limit-protected: never dump below this floor. If the book has gapped
+        # below it (flash crash / thin bid), DEFER — hold through the spike and
+        # retry next tick rather than sell at the bottom of a dip that may bounce
+        # (the whipsaw that cost us). The $100 account-stop is the catastrophe backstop.
+        floor = avg * (1 - pct - config.MAKER_STOP_MAX_SLIP_PCT)
+        bid = snap.get("bid") or 0.0
+        if bid < floor:
+            ctx.log_event(self._ctx_row(snap, event="stop_deferred", side="sell",
+                                        note=f"bid {bid:.6f} < floor {floor:.6f} (avg {avg:.6f})"))
+            return False
         if self.orders["buy"] or self.orders["sell"]:
             self._cancel_open()
             self.orders = {"buy": None, "sell": None}
         qty = self._round_lot(inv_base, snap.get("lot"), minq)
-        px = self._snap_px(snap["bid"], snap["tick"])      # cross into the bid → immediate
+        px = self._snap_px(bid, snap["tick"])              # cross into the bid (>= floor) → immediate
         res = self.dex.place_order(self.pair, "sell", qty, order_type="ioc",
                                    limit_price=px, funding="wallet", skip_sim=True, gas_min=self.gas_min)
         if res.get("status") == "success":

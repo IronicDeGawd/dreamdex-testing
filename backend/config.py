@@ -78,7 +78,8 @@ MAKER_DRIFT_TICKS  = int(os.environ.get("MAKER_DRIFT_TICKS", 2))    # touch drif
 # Per-pair stop-loss. If mid drops to avg_cost*(1-pct), cut the whole position
 # (IOC into the bid), overriding the no-realized-loss rule, then pause re-entry
 # for the cooldown so we don't catch a falling knife. Set pct=0 to disable.
-MAKER_STOP_LOSS_PCT   = float(os.environ.get("MAKER_STOP_LOSS_PCT", 0.06))   # 6% below avg cost
+MAKER_STOP_LOSS_PCT   = float(os.environ.get("MAKER_STOP_LOSS_PCT", 0.10))   # trigger: 10% below avg cost
+MAKER_STOP_MAX_SLIP_PCT = float(os.environ.get("MAKER_STOP_MAX_SLIP_PCT", 0.03))  # don't sell below cost*(1-pct-slip); defer if book gapped lower
 MAKER_STOP_COOLDOWN_S = int(os.environ.get("MAKER_STOP_COOLDOWN_S", 900))    # re-entry pause after a stop
 
 # Gas management (50 SOMI given, no refills — convert own USDso for more)
