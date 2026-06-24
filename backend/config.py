@@ -69,9 +69,9 @@ ELIGIBLE_PAIRS     = ["SOMI:USDso", "WBTC:USDso"]
 MAKER_PAIR_ALLOC   = {"SOMI:USDso": 0.8, "WBTC:USDso": 0.2}
 
 # Two-sided PostOnly market-making
-MAKER_LEG_USD      = float(os.environ.get("MAKER_LEG_USD", 25.0))   # USDso notional per resting leg
+MAKER_LEG_USD      = float(os.environ.get("MAKER_LEG_USD", 65.0))   # USDso notional per resting leg
 MAKER_MARGIN_TICKS = int(os.environ.get("MAKER_MARGIN_TICKS", 1))   # SELL ≥ avg_cost + this → no realized loss
-MAKER_MAX_INV_USD  = float(os.environ.get("MAKER_MAX_INV_USD", 40.0))  # base-inventory cap for the top-allocated pair
+MAKER_MAX_INV_USD  = float(os.environ.get("MAKER_MAX_INV_USD", 90.0))  # base-inventory cap for the top-allocated pair (SOMI); WBTC scales to ~$22
 MAKER_POLL_S       = int(os.environ.get("MAKER_POLL_S", 8))         # fill-poll / reconcile interval
 MAKER_DRIFT_TICKS  = int(os.environ.get("MAKER_DRIFT_TICKS", 2))    # touch drift that triggers a re-quote
 
