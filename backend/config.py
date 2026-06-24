@@ -75,6 +75,12 @@ MAKER_MAX_INV_USD  = float(os.environ.get("MAKER_MAX_INV_USD", 90.0))  # base-in
 MAKER_POLL_S       = int(os.environ.get("MAKER_POLL_S", 8))         # fill-poll / reconcile interval
 MAKER_DRIFT_TICKS  = int(os.environ.get("MAKER_DRIFT_TICKS", 2))    # touch drift that triggers a re-quote
 
+# Per-pair stop-loss. If mid drops to avg_cost*(1-pct), cut the whole position
+# (IOC into the bid), overriding the no-realized-loss rule, then pause re-entry
+# for the cooldown so we don't catch a falling knife. Set pct=0 to disable.
+MAKER_STOP_LOSS_PCT   = float(os.environ.get("MAKER_STOP_LOSS_PCT", 0.06))   # 6% below avg cost
+MAKER_STOP_COOLDOWN_S = int(os.environ.get("MAKER_STOP_COOLDOWN_S", 900))    # re-entry pause after a stop
+
 # Gas management (50 SOMI given, no refills — convert own USDso for more)
 GAS_RESERVE_SOMI    = float(os.environ.get("GAS_RESERVE_SOMI", 5.0))   # floor before forced refuel
 GAS_REFUEL_USDSO    = float(os.environ.get("GAS_REFUEL_USDSO", 5.0))   # USDso→SOMI per refuel (from working capital)
