@@ -41,6 +41,7 @@ class PairMaker:
         self.cap_usd = config.MAKER_MAX_INV_USD * (alloc / max_alloc)
         # our currently-resting orders, per side: {"id","price","qty","filled"}
         self.orders: dict[str, dict | None] = {"buy": None, "sell": None}
+        self._reenter_after = 0.0          # epoch; buy side paused until this (post stop-loss)
 
     # ── helpers ───────────────────────────────────────────────────────────
     @staticmethod
@@ -133,6 +134,8 @@ class PairMaker:
             return
         if not self.dry_run:
             self._poll_fills(snap)             # record any fills on resting orders first
+            if self._check_stop_loss(snap):    # position underwater past the stop → cut + cooldown
+                return
         desired = self._desired(snap, params)
         self._reconcile(desired, snap)
 
@@ -148,7 +151,8 @@ class PairMaker:
         out: dict = {}
 
         # BUY — add inventory while under the cap and we can afford a min order
-        if inv_usd < self.cap_usd:
+        # (paused during the post-stop-loss cooldown so we don't re-buy into a slide)
+        if inv_usd < self.cap_usd and time.time() >= self._reenter_after:
             our_bid = self._snap_px(bid, tick)
             buy_usd = min(leg, self.cap_usd - inv_usd, quote_avail)
             if our_bid > 0 and buy_usd >= max(minq * our_bid, 0):
@@ -241,6 +245,39 @@ class PairMaker:
         else:
             ctx.log_event(self._ctx_row(snap, event="error", side="sell", status=res.get("status"),
                                         note=f"flatten: {str(res)[:90]}"))
+
+    def _check_stop_loss(self, snap) -> bool:
+        """If the position is underwater past MAKER_STOP_LOSS_PCT below avg cost,
+        cut it all into the bid (overriding the no-loss rule) and start a re-entry
+        cooldown. Returns True when a stop fired (skip the rest of the tick)."""
+        pct = config.MAKER_STOP_LOSS_PCT
+        if pct <= 0:
+            return False
+        inv_base = self.inv.base(self.pair)
+        minq = snap.get("minq") or 0.0
+        avg = self.inv.avg_cost(self.pair)
+        mid = snap.get("mid") or 0.0
+        if inv_base <= minq or avg <= 0 or mid <= 0 or mid > avg * (1 - pct):
+            return False
+        if self.orders["buy"] or self.orders["sell"]:
+            self._cancel_open()
+            self.orders = {"buy": None, "sell": None}
+        qty = self._round_lot(inv_base, snap.get("lot"), minq)
+        px = self._snap_px(snap["bid"], snap["tick"])      # cross into the bid → immediate
+        res = self.dex.place_order(self.pair, "sell", qty, order_type="ioc",
+                                   limit_price=px, funding="wallet", skip_sim=True, gas_min=self.gas_min)
+        if res.get("status") == "success":
+            delta = self.inv.record_fill(self.pair, "sell", px, qty)
+            ctx.log_event(self._ctx_row(snap, event="stop_loss", side="sell", our_px=px, qty=qty,
+                                        status="success", realized_pnl_delta=delta))
+            self._reenter_after = time.time() + config.MAKER_STOP_COOLDOWN_S
+            print(f"[maker {self.pair}] STOP-LOSS cut {qty:g} @ {px} "
+                  f"(avg {avg:.6f}, mid {mid:.6f}, {delta:.4f} USDso) → "
+                  f"cooldown {config.MAKER_STOP_COOLDOWN_S}s", flush=True)
+            return True
+        ctx.log_event(self._ctx_row(snap, event="error", side="sell", status=res.get("status"),
+                                    note=f"stop_loss: {str(res)[:90]}"))
+        return False
 
     def _poll_fills(self, snap):
         om = self._open_map()
