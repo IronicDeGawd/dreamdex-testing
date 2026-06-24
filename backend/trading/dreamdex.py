@@ -388,7 +388,11 @@ class DreamDEX:
                 # returns the amount as a raw integer (already 10^dec scaled), the
                 # naive `app_amount * 10^dec` would over-approve by 1e6–1e18×.
                 # Sanity bound: 2× (qty × price) in quote, or 2× qty in base.
-                raw_naive = int(app_amount * (10 ** dec))
+                # round (not truncate): float(0.00015)*1e8 == 14999.9999… and a
+                # naive int() floors to 14999, one unit below the order's 15000 →
+                # ERC20InsufficientAllowance revert. round() lands on 15000 and
+                # matches the units the API encodes into the order quantity.
+                raw_naive = int(round(app_amount * (10 ** dec)))
                 # Compute the conservative cap. Use the order's own price/qty.
                 from config import MARKETS as _M
                 _mkt = _M.get(symbol, {})
@@ -396,7 +400,7 @@ class DreamDEX:
                     cap_human = float(payload.get("price", "0") or 0) * qty * 2.0
                 else:
                     cap_human = qty * 2.0
-                raw_cap = int(cap_human * (10 ** dec)) if cap_human > 0 else raw_naive
+                raw_cap = int(round(cap_human * (10 ** dec))) if cap_human > 0 else raw_naive
                 # If naive is wildly bigger than cap (more than 1e4×), assume the
                 # API returned a raw int already — use cap. Otherwise trust naive.
                 if cap_human > 0 and raw_naive > raw_cap * 10_000:
