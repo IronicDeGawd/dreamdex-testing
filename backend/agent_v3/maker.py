@@ -157,7 +157,9 @@ class PairMaker:
         trend_down = False
         if config.TREND_GUARD_PCT > 0:
             m_ago = ctx.mid_ago(self.pair, config.TREND_LOOKBACK_S)
-            if m_ago and mid < m_ago * (1 - config.TREND_GUARD_PCT):
+            if m_ago is None:
+                trend_down = True          # no trend data → FAIL SAFE: don't buy/accumulate
+            elif mid < m_ago * (1 - config.TREND_GUARD_PCT):
                 trend_down = True
 
         # Keepalive: if we've gone too long without a trade (trend-guarded into cash),
