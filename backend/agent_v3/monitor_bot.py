@@ -140,25 +140,28 @@ def market_preview_text() -> str:
 
 
 def our_pnl() -> tuple[float, dict]:
-    """Our own PnL vs the $150 start, from the agent's trade accounting:
-    realized (completed round-trips) + unrealized (open inventory at current mid).
-    Independent of the leaderboard's free-USDso-only snapshot. Capital reserved in
-    an unfilled buy is worth its face value, so it contributes 0 here (correct)."""
-    positions, realized = ctx.load_inventory()
-    unreal = 0.0
-    detail = {"realized": realized, "positions": {}}
-    for pair, pos in positions.items():
-        base = pos.get("base", 0.0) or 0.0
-        avg = pos.get("avg_cost", 0.0) or 0.0
-        if base <= 0 or avg <= 0:
-            continue
-        mid = _fetch_mid(pair)
-        if mid:
-            u = (mid - avg) * base
-            unreal += u
-            detail["positions"][pair] = {"base": base, "avg": avg, "mid": mid, "unreal": u}
-    detail["unreal"] = unreal
-    return realized + unreal, detail
+    """REAL total-asset PnL, read from the CHAIN (not the fill tracker, which
+    desyncs for native SOMI and undercounts holdings). Net worth = free USDso +
+    ALL native SOMI + WBTC, each valued at the current mid. PnL is vs the starting
+    basis the rules gave us: 150 USDso + 50 SOMI (gas), the 50 valued at today's
+    SOMI price so a SOMI price move doesn't masquerade as our trading PnL.
+    Also surfaces free-USDso (the leaderboard's scoring basis) for context."""
+    bal = chain_balances()
+    usdso = bal.get("usdso") or 0.0
+    somi = bal.get("somi") or 0.0
+    wbtc = bal.get("wbtc") or 0.0
+    p_somi = _fetch_mid("SOMI:USDso") or 0.0
+    p_wbtc = _fetch_mid("WBTC:USDso") or 0.0
+    networth = usdso + somi * p_somi + wbtc * p_wbtc
+    basis = config.STARTING_CAPITAL + config.STARTING_GAS_SOMI * p_somi
+    _, realized = ctx.load_inventory()        # tracker realized — reference only
+    detail = {
+        "networth": networth, "usdso": usdso, "somi": somi, "wbtc": wbtc,
+        "p_somi": p_somi, "p_wbtc": p_wbtc, "realized": realized,
+        "free_pnl": usdso - config.STARTING_CAPITAL,
+        "mult": 1.0 + (usdso - config.STARTING_CAPITAL) / config.STARTING_CAPITAL,
+    }
+    return networth - basis, detail
 
 
 def our_standing(lb: dict) -> tuple[dict | None, int, int]:
@@ -172,13 +175,15 @@ def our_standing(lb: dict) -> tuple[dict | None, int, int]:
 
 
 def chain_balances() -> dict:
-    out = {"somi": None, "usdso": None}
+    out = {"somi": None, "usdso": None, "wbtc": None}
     try:
         w3 = Web3(Web3.HTTPProvider(config.SOMNIA_RPC))
         addr = Web3.to_checksum_address(config.MY_ADDRESS)
         out["somi"] = w3.eth.get_balance(addr) / 1e18
         usdso = w3.eth.contract(address=Web3.to_checksum_address(config.USDSO_ADDRESS), abi=_ERC20)
         out["usdso"] = usdso.functions.balanceOf(addr).call() / 1e18
+        wbtc = w3.eth.contract(address=Web3.to_checksum_address(config.WBTC_ADDRESS), abi=_ERC20)
+        out["wbtc"] = wbtc.functions.balanceOf(addr).call() / 1e8
     except Exception as e:
         print(f"[monitor] balance read failed: {e}", flush=True)
     return out
@@ -193,10 +198,16 @@ def _fmt(x) -> str:
 def summary_text(row, rank, total, bal, opnl, odetail) -> str:
     if not row:
         return "📊 <b>DreamDEX V3</b>\nOur wallet not on the leaderboard yet."
-    pnl_pct = opnl / config.STARTING_CAPITAL * 100
+    p_somi = odetail.get("p_somi", 0) or 0
+    p_wbtc = odetail.get("p_wbtc", 0) or 0
+    basis = config.STARTING_CAPITAL + config.STARTING_GAS_SOMI * p_somi
+    pnl_pct = opnl / basis * 100 if basis else 0.0
     emoji = "🟢" if opnl >= 0 else "🔴"
-    somi = f"{bal['somi']:.2f}" if bal["somi"] is not None else "?"
-    usdso = f"{bal['usdso']:.2f}" if bal["usdso"] is not None else "?"
+    networth = odetail.get("networth", 0) or 0
+    usdso = odetail.get("usdso", 0) or 0
+    somi = odetail.get("somi", 0) or 0
+    wbtc = odetail.get("wbtc", 0) or 0
+    mult = odetail.get("mult", 1.0)
     vol = row.get("volumeUsdso", 0)
 
     lines = [
@@ -206,20 +217,17 @@ def summary_text(row, rank, total, bal, opnl, odetail) -> str:
         f"📈 Volume: <b>{vol:,.0f}</b> USDso",
         f"🎯 Milestones: {int(vol // MILESTONE_USDSO)} × $25",
         "",
-        f"{emoji} PnL: <b>{opnl:+.2f}</b> USDso ({pnl_pct:+.1f}%)",
-        f"   realized: {odetail.get('realized', 0):+.2f}",
-        f"   unrealized: {odetail.get('unreal', 0):+.2f}",
+        f"{emoji} Real PnL: <b>{opnl:+.2f}</b> USDso ({pnl_pct:+.1f}%)",
+        f"   net worth: <b>${networth:,.2f}</b> (start ~${basis:,.0f})",
+        f"   free USDso: {usdso:,.2f} (score mult {mult:.2f})",
         "",
         f"🔄 Fills: {row.get('fills', 0)}",
         f"🧾 Tx: {row.get('txCount', 0)}",
-        f"👛 USDso: {usdso}",
-        f"⛽ SOMI: {somi}",
+        "💰 Holdings:",
+        f"   SOMI: {somi:,.1f} (~${somi * p_somi:,.1f})",
     ]
-    if odetail.get("positions"):
-        lines.append("")
-        lines.append("📦 Inventory:")
-        for p, d in odetail["positions"].items():
-            lines.append(f"   {p.split(':')[0]}: {d['base']:g} @ {_fmt(d['avg'])} → {_fmt(d['mid'])}")
+    if wbtc and wbtc > 1e-9:
+        lines.append(f"   WBTC: {wbtc:.5f} (~${wbtc * p_wbtc:,.1f})")
     return "\n".join(lines)
 
 
@@ -266,10 +274,10 @@ def run():
             if state["rank"] is not None and rank != state["rank"]:
                 arrow = "⬆️" if rank < state["rank"] else "⬇️"
                 send(f"{arrow} Rank {state['rank']} → <b>{rank}</b>/{total}")
-            neg = opnl < -1.0                      # alert only on a real (our-calc) loss
+            neg = opnl < -2.0                      # alert only on a real total-asset loss
             if state["pnl_neg"] is not None and neg and not state["pnl_neg"]:
-                send(f"⚠️ Our PnL negative: {opnl:+.2f} USDso (real {odetail.get('realized',0):+.2f} / "
-                     f"unreal {odetail.get('unreal',0):+.2f})")
+                send(f"⚠️ Real PnL negative: {opnl:+.2f} USDso "
+                     f"(net worth ${odetail.get('networth',0):,.2f}, free USDso {odetail.get('usdso',0):,.2f})")
 
             state.update(fills=fills, rank=rank, pnl_neg=neg, milestone=ms)
 

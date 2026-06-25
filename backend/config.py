@@ -61,6 +61,8 @@ STRATEGIST_ENABLED    = os.environ.get("STRATEGIST_ENABLED", "true").lower() == 
 # ── R3 Profit-Maker rules ─────────────────────────────────────────────────
 # Scoring is Effective Volume = Raw Volume × (1 + PnL%); a wipe = 0. Profit first.
 STARTING_CAPITAL   = 150.0   # USDso, fixed by rules — no top-ups ever
+STARTING_GAS_SOMI  = 50.0    # SOMI given for gas at start (part of the starting basis)
+WBTC_ADDRESS       = "0xC5098b3cA516784323872F17235fa074E167D3D2"  # WBTC token (8 decimals)
 RESERVE_USDSO      = float(os.environ.get("RESERVE_USDSO", 20.0))  # held untouched (gas + PnL cushion)
 # Contest-eligible pairs we actually quote. SOMI has the widest (capturable)
 # spread; WBTC second. WETH's ~1.4bps spread isn't worth the adverse selection.
