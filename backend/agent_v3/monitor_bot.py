@@ -124,13 +124,29 @@ _MID_SANE = {"SOMI:USDso": (0.03, 0.5), "WBTC:USDso": (1e4, 2e5),
 _LAST_MID: dict = {}
 
 
+def _ema_mid(pair: str):
+    """On-chain EMA midpoint (word0/1e18) — a reliable price fallback when the
+    order-book API read glitches or is empty."""
+    try:
+        pool = config.MARKETS.get(pair, {}).get("contract")
+        if not pool:
+            return None
+        w3 = Web3(Web3.HTTPProvider(config.SOMNIA_RPC))
+        raw = w3.eth.call({"to": Web3.to_checksum_address(pool), "data": "0x2d1590a0"})
+        return int.from_bytes(raw[:32], "big") / 1e18
+    except Exception:
+        return None
+
+
 def _fetch_mid(pair: str) -> float | None:
-    b = _fetch_book(pair)
-    m = b["mid"] if b else None
+    """Sane-clamped mid for valuation: order-book mid → on-chain EMA → last good.
+    Prevents a glitchy/empty read from valuing a held coin at 0 (false low net worth)."""
     lo, hi = _MID_SANE.get(pair, (0.0, float("inf")))
-    if m is not None and lo <= m <= hi:
-        _LAST_MID[pair] = m
-        return m
+    b = _fetch_book(pair)
+    for cand in ((b["mid"] if b else None), _ema_mid(pair)):
+        if cand is not None and lo <= cand <= hi:
+            _LAST_MID[pair] = cand
+            return cand
     return _LAST_MID.get(pair)   # last sane value (None only until first good read)
 
 
