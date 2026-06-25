@@ -116,9 +116,22 @@ def _fetch_book(pair: str) -> dict | None:
         return None
 
 
+# Sane per-pair price bands — a book read outside these is a glitch (thin/empty
+# book, partial API response). One bad read once undervalued our SOMI and showed
+# a fake -$36 net worth, so clamp: out-of-band → fall back to the last good mid.
+_MID_SANE = {"SOMI:USDso": (0.03, 0.5), "WBTC:USDso": (1e4, 2e5),
+             "WETH:USDso": (200.0, 1e4), "USDC.e:USDso": (0.5, 1.5)}
+_LAST_MID: dict = {}
+
+
 def _fetch_mid(pair: str) -> float | None:
     b = _fetch_book(pair)
-    return b["mid"] if b else None
+    m = b["mid"] if b else None
+    lo, hi = _MID_SANE.get(pair, (0.0, float("inf")))
+    if m is not None and lo <= m <= hi:
+        _LAST_MID[pair] = m
+        return m
+    return _LAST_MID.get(pair)   # last sane value (None only until first good read)
 
 
 def market_preview_text() -> str:
