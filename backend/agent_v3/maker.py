@@ -42,6 +42,7 @@ class PairMaker:
         # our currently-resting orders, per side: {"id","price","qty","filled"}
         self.orders: dict[str, dict | None] = {"buy": None, "sell": None}
         self._reenter_after = 0.0          # epoch; buy side paused until this (post stop-loss)
+        self._start_ts = time.time()       # idle baseline before any trade history exists
 
     # ── helpers ───────────────────────────────────────────────────────────
     @staticmethod
@@ -150,11 +151,27 @@ class PairMaker:
         quote_avail = self.inv.working_capital(self.capital_fn()) * self.alloc
         out: dict = {}
 
+        # Trend guard: spread capture needs a two-way book. If this coin fell more
+        # than TREND_GUARD_PCT over the lookback, it's a one-way downtrend — pause
+        # BUYING (don't catch the knife / accumulate a bleeding bag). SELL stays on.
+        trend_down = False
+        if config.TREND_GUARD_PCT > 0:
+            m_ago = ctx.mid_ago(self.pair, config.TREND_LOOKBACK_S)
+            if m_ago and mid < m_ago * (1 - config.TREND_GUARD_PCT):
+                trend_down = True
+
+        # Keepalive: if we've gone too long without a trade (trend-guarded into cash),
+        # allow ONE tiny buy to reset the 24h idle-DQ clock. Tiny leg → negligible bag.
+        lt = ctx.last_trade_ts() or self._start_ts
+        keepalive = (time.time() - lt) > config.LIVENESS_MAX_IDLE_S
+
         # BUY — add inventory while under the cap and we can afford a min order
-        # (paused during the post-stop-loss cooldown so we don't re-buy into a slide)
-        if inv_usd < self.cap_usd and time.time() >= self._reenter_after:
+        # (paused during the post-stop-loss cooldown, and while trending down — unless
+        # a keepalive is due, in which case we place a tiny buy regardless of trend)
+        if inv_usd < self.cap_usd and time.time() >= self._reenter_after and (not trend_down or keepalive):
             our_bid = self._snap_px(bid, tick)
-            buy_usd = min(leg, self.cap_usd - inv_usd, quote_avail)
+            eff_leg = config.KEEPALIVE_LEG_USD if (trend_down and keepalive) else leg
+            buy_usd = min(eff_leg, self.cap_usd - inv_usd, quote_avail)
             if our_bid > 0 and buy_usd >= max(minq * our_bid, 0):
                 qty = self._round_lot(buy_usd / our_bid, lot, minq)
                 if qty > 0 and qty * our_bid <= quote_avail + 1e-9:
