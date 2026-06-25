@@ -152,7 +152,17 @@ class Runner:
         while not self.stop.is_set():
             try:
                 if ctx.control_enabled():
-                    value = self.total_usdso() + self.inv.inventory_value_usdso(self._mids())
+                    mids = self._mids()
+                    # Value from the CHAIN, not the fill tracker — the tracker desyncs
+                    # for native SOMI and UNDERcounts holdings, which false-tripped this
+                    # auto-stop ($95.81 when real value was ~$109) and forced a bad flatten.
+                    value = self.total_usdso()
+                    try:
+                        w = self.dex.wallet
+                        value += (w.w3.eth.get_balance(w.address) / 1e18) * (mids.get("SOMI:USDso") or 0)
+                        value += w.erc20_balance(config.WBTC_ADDRESS, 8) * (mids.get("WBTC:USDso") or 0)
+                    except Exception as e:
+                        print(f"[control] on-chain value read failed: {e}", flush=True)
                     if value < config.MIN_CAPITAL_STOP:
                         ctx.set_control(False)
                         print(f"[control] account value ${value:.2f} < ${config.MIN_CAPITAL_STOP:.0f} "

@@ -84,6 +84,14 @@ MAKER_STOP_LOSS_PCT   = float(os.environ.get("MAKER_STOP_LOSS_PCT", 0.10))   # t
 MAKER_STOP_MAX_SLIP_PCT = float(os.environ.get("MAKER_STOP_MAX_SLIP_PCT", 0.03))  # don't sell below cost*(1-pct-slip); defer if book gapped lower
 MAKER_STOP_COOLDOWN_S = int(os.environ.get("MAKER_STOP_COOLDOWN_S", 900))    # re-entry pause after a stop
 
+# Trend guard: spread capture needs a two-way (oscillating) market. In a one-way
+# DOWNtrend only our bid fills → we accumulate a bleeding bag. So pause BUYING a
+# coin while it's trending down (mid fell > pct over the lookback); the SELL side
+# stays on to offload. Auto-resumes buying when the coin goes flat/up. Set pct=0 off.
+TREND_GUARD_PCT   = float(os.environ.get("TREND_GUARD_PCT", 0.015))   # 1.5% drop over lookback = downtrend
+TREND_LOOKBACK_S  = int(os.environ.get("TREND_LOOKBACK_S", 3600))     # compare mid to ~1h ago
+KEEPALIVE_LEG_USD = float(os.environ.get("KEEPALIVE_LEG_USD", 1.0))   # tiny buy to reset the idle clock when trend-guarded into cash (avoids 24h DQ)
+
 # Gas management (50 SOMI given, no refills — convert own USDso for more)
 GAS_RESERVE_SOMI    = float(os.environ.get("GAS_RESERVE_SOMI", 5.0))   # floor before forced refuel
 GAS_REFUEL_USDSO    = float(os.environ.get("GAS_REFUEL_USDSO", 5.0))   # USDso→SOMI per refuel (from working capital)

@@ -101,6 +101,23 @@ def load_inventory() -> tuple[dict, float]:
     return positions, realized
 
 
+def mid_ago(pair: str, lookback_s: float):
+    """The most recent recorded mid for `pair` at or before (now - lookback_s),
+    for trend detection. None if we have no history that far back."""
+    try:
+        cutoff = time.time() - lookback_s
+        with _connect() as conn:
+            r = conn.execute(
+                "SELECT mid FROM quote_context WHERE pair=? AND mid IS NOT NULL "
+                "AND ts<=? ORDER BY ts DESC LIMIT 1",
+                (pair, cutoff),
+            ).fetchone()
+            return float(r["mid"]) if r and r["mid"] is not None else None
+    except Exception as e:
+        print(f"[context_store] mid_ago failed: {e}", flush=True)
+        return None
+
+
 def log_event(row: dict) -> None:
     """Insert one context row. Unknown keys are ignored; missing keys → NULL."""
     row = dict(row)
