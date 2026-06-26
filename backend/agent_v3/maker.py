@@ -67,6 +67,24 @@ class PairMaker:
             qty = round(minq, dec)
         return qty
 
+    def _onchain_base(self):
+        """Real on-chain holding of this pair's base token, the source of truth for
+        how much we actually hold. ERC20 base (WBTC/WETH) → balanceOf is exact.
+        Native SOMI commingles with gas so it can't be separated → return None
+        (keep the tracker). None also on any read error → safe fallback to tracker."""
+        if self.native:
+            return None
+        try:
+            mkt = config.MARKETS.get(self.pair, {})
+            token = mkt.get("base")
+            dec = int(mkt.get("baseDecimals", 18))
+            if not token:
+                return None
+            return self.dex.wallet.erc20_balance(token, dec)
+        except Exception as e:
+            print(f"[maker {self.pair}] onchain base read failed: {e}", flush=True)
+            return None
+
     def _open_map(self) -> dict:
         try:
             return {str(o.get("orderId") or o.get("id") or o.get("order_id")): o
@@ -135,6 +153,7 @@ class PairMaker:
             return
         if not self.dry_run:
             self._poll_fills(snap)             # record any fills on resting orders first
+            self.inv.sync_base(self.pair, self._onchain_base())   # holdings = chain truth, not the drifting counter
             if self._check_stop_loss(snap):    # position underwater past the stop → cut + cooldown
                 return
         desired = self._desired(snap, params)

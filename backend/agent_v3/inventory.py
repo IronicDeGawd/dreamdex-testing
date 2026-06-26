@@ -52,6 +52,23 @@ class Inventory:
     def base(self, pair: str) -> float:
         return self.positions.get(pair, {}).get("base", 0.0)
 
+    def sync_base(self, pair: str, onchain_base) -> None:
+        """Make the tracked base match the CHAIN (the source of truth). The fill
+        counter drifts (phantom fills, missed sells, native-SOMI gas commingling),
+        which caused phantom inventory, bad flattens, and false stops. avg_cost is
+        kept (the chain has no cost basis); it's reset only when we're truly flat.
+        onchain_base=None means 'can't determine' (e.g. native pair) → keep tracker."""
+        if onchain_base is None:
+            return
+        if onchain_base < 1e-12:
+            onchain_base = 0.0
+        pos = self.positions.setdefault(pair, {"base": 0.0, "avg_cost": 0.0})
+        if abs(pos["base"] - onchain_base) > 1e-12:
+            pos["base"] = onchain_base
+            if onchain_base == 0.0:
+                pos["avg_cost"] = 0.0
+            self._save()
+
     def avg_cost(self, pair: str) -> float:
         return self.positions.get(pair, {}).get("avg_cost", 0.0)
 
