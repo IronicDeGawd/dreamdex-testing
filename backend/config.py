@@ -64,11 +64,12 @@ STARTING_CAPITAL   = 150.0   # USDso, fixed by rules — no top-ups ever
 STARTING_GAS_SOMI  = 50.0    # SOMI given for gas at start (part of the starting basis)
 WBTC_ADDRESS       = "0xC5098b3cA516784323872F17235fa074E167D3D2"  # WBTC token (8 decimals)
 RESERVE_USDSO      = float(os.environ.get("RESERVE_USDSO", 20.0))  # held untouched (gas + PnL cushion)
-# Contest-eligible pairs we actually quote. SOMI has the widest (capturable)
-# spread; WBTC second. WETH's ~1.4bps spread isn't worth the adverse selection.
-ELIGIBLE_PAIRS     = ["SOMI:USDso", "WBTC:USDso"]
+# Contest-eligible pairs we actually quote. SOMI EXCLUDED — its gradual grind
+# kept slipping under the trend guard and bled via inventory accumulation. Trade
+# only WBTC + WETH (lower-volatility majors); trend guard still gates both.
+ELIGIBLE_PAIRS     = ["WBTC:USDso", "WETH:USDso"]
 # Working-capital allocation per pair (fractions of the non-reserve balance).
-MAKER_PAIR_ALLOC   = {"SOMI:USDso": 0.8, "WBTC:USDso": 0.2}
+MAKER_PAIR_ALLOC   = {"WBTC:USDso": 0.5, "WETH:USDso": 0.5}
 
 # Two-sided PostOnly market-making
 MAKER_LEG_USD      = float(os.environ.get("MAKER_LEG_USD", 65.0))   # USDso notional per resting leg
