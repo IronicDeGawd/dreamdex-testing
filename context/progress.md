@@ -1,6 +1,32 @@
 # Progress — DreamDEX Contest Agent (Round 3)
 
-**STATUS 2026-06-24: 🟢 V3 PROFIT-MAKER LIVE ON MAINNET.** R2 WON #1. R3 scoring = Effective Volume = Raw × (1 + PnL%); wipe = 0; 14 days, $150 start, no top-ups, 50 SOMI gas, eligible BTC/ETH/SOMI (no stablecoin), >24h idle = DQ. Built + testnet-validated + deployed a **bounded two-sided market maker** (SOMI 80% / WBTC 20%, leg $65, inv cap SOMI $90 / WBTC $22, reserve $20, no realized loss, Gemini 2.5 Pro strategist, Telegram monitor with /start /stop /status + $100 auto-stop). **Rank 5/6** (last among real traders) — NOT because we bleed (real wealth ~$149, flat) but because **the contest scores FREE USDso, and our ~$100 held in SOMI+WBTC reads as a loss → multiplier 0.33 → 304 raw = 101 effective.** Added a **per-pair stop-loss** (6%, 15m cooldown) 2026-06-24 to bound the held-SOMI-bag downside (user chose to HOLD the bag for recovery rather than flatten). **Live state + deploy in the "LIVE ON MAINNET" section below.** Maker yield negligible (~$0.16/2wk).
+**STATUS 2026-06-26: 🛑 BOT FULLY STOPPED — CAPITAL PRESERVATION.** Both containers `Exited` on server. Funds parked on-chain: **~$137.74 USDso + ~19.5 SOMI ≈ $140**. Real PnL ≈ **−$10** (vs $150) / **−$15** (vs 150+50SOMI). Decision: STOP and hold stablecoin because (1) ranking is volume-dominated and we're #4/6 (effVol 884 vs leaders 12k–53k) — top-2 unreachable; (2) sustained bear (SOMI −40%/30d, BTC −22%, ETH −26%) → no profitable spot trade (no chop, can't short); (3) dev confirmed final PnL = convert all to USDso at contest END (holding inventory neutral until end). The ~$13 lost = gas + buy-high/sell-low across restart/experiment churn. **All V3 fixes shipped (see "V3 ISSUES — FULL LOG" below); images built but NOT started.** Restart only if market turns: `cd ~/dreamdex-r3/backend && docker compose up -d agent` + set `agent_state.enabled=1` (CHECK enabled BEFORE restart — 0 = flattens on boot).
+
+> **R2 WON #1.** R3 scoring = Effective Volume = Raw × (1 + PnL%); wipe = 0; 14 days, $150 start + 50 SOMI gas, no top-ups, eligible BTC/ETH/SOMI (no stablecoin), >24h idle = DQ, milestones $25/500k EFFECTIVE vol (unreachable — leader ~53k), top-2 qualify.
+
+## V3 ISSUES — FULL LOG (2026-06-24 → 06-26)
+**Scoring / strategy realizations:**
+- 🌟 Effective Volume = raw × (1 + (freeUSDso−150)/150) — verified to the $ across all traders. LIVE leaderboard uses FREE USDso (held inventory = scored as loss). Dev says FINAL PnL = liquidate-all-to-USDso at contest end (inventory neutral until then). See [[scoring-uses-free-usdso-inventory-is-poison]].
+- 🌟 **Raw volume dominates** despite the PnL multiplier: trader-3 did 127k raw at −$129 → 53k effective, crushing our 963 raw × good multiplier = 884. Can't win without huge volume; huge volume in a bear = bleed. No profitable path in a sustained downtrend (can't short on spot).
+- 🌟 Leaders' real net worth (on-chain) ≠ leaderboard pnl: t1 ~$138, t5 ~$147, t3 ~$75, us ~$140 — they did 16–25× our volume AND kept similar capital (held bags, not realized losses). We have neither volume nor a capital edge.
+- Arb ruled out (DreamDEX vs GingerSwap SOMI gap ~0.66% < ~1% round-trip cost; LI.FI Somnia = bridge-only = banned top-up). Self-match ruled out (selfMatchingOption=1=cancelMaker + rule #9 DQ). Maker yield negligible.
+
+**Bugs found + FIXED this session:**
+- ✅ **Inventory fill-tracker desyncs from chain** (phantom fills, native-SOMI/gas commingle) → caused phantom inventory, bad flattens (revert loops), over-buying, false auto-stop. FIX: `Inventory.sync_base()` makes base CHAIN-authoritative each tick for ERC20 pairs (verified: phantom 0.00022 WBTC → 0). Native SOMI still tracker (gas commingled).
+- ✅ **Monitor showed false losses** (−$7 realized-only from desynced tracker; −$36 from a glitched SOMI book price ~0.0145; −$10 from WBTC priced at $0 when book read returned nothing). FIX: monitor reads REAL net worth on-chain + sane-band price clamp + on-chain EMA fallback + last-good cache. Audit-verified: matches chain to 0.0000.
+- ✅ **$100 auto-stop FALSE-fired** ($95.81 when real value ~$109) because it valued inventory off the desynced tracker → unprotected flatten realized losses. FIX: auto-stop now reads on-chain value.
+- ✅ **Stop-loss whipsaw**: 6% market-IOC dumped into a thin/crashed bid (filled ~8% below trigger), then SOMI bounced. FIX: 10% trigger + limit-protected execution (defer if bid gaps below floor) + 15m cooldown.
+- ✅ **WBTC approval underflow**: `int(0.00015*1e8)`=14999 (one unit under) → `ERC20InsufficientAllowance` revert. FIX: `int(round(...))`.
+- ✅ Native SOMI place+cancel need gas ≥5M (InsufficientGasForPayout); cancel now verifies receipt.
+- ✅ Lot-precision 400s (round-before-floor + decimal snap).
+- ✅ Trend guard: pauses BUY when coin down >TREND_GUARD_PCT/24h; fails OPEN with no history (so chosen pairs can trade) + keepalive (tiny buy near 24h idle to avoid DQ). KNOWN LIMIT: only catches CLIFFS not gradual grinds (−1%/day slips under) → trading a slow-bleed market still loses; only zero-bleed = cash.
+
+**Config now:** pairs WBTC+WETH (SOMI EXCLUDED — grind-bled), alloc 0.5/0.5, `MAKER_MAX_INV_USD=20`, `STRATEGIST_ENABLED=false` (no Gemini tokens), `TREND_LOOKBACK_S=86400`, `TREND_GUARD_PCT=0.015`, stop-loss 10%, `KEEPALIVE_LEG_USD=1`.
+
+**Open / unresolved:** native-SOMI inventory still tracker-based (gas commingle — can't separate on-chain); we will not place top-2 (volume gap); ~$13 sunk (unrecoverable without profit). DQ in ~24h of full stop (irrelevant — can't place anyway).
+
+---
+### (historical V3 detail below — superseded by the log above)
 
 > **📖 Full verified DreamDEX mechanics/economics/slippage/fill-rate reference: `context/research/dreamdex.md`** (zero pool fees; toll ~$0.09–0.10/1k; ceiling = capital×~10k; slip=50 → ~100% fill). **Re-verify these still hold in R3 before relying on them.**
 

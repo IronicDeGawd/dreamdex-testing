@@ -1,4 +1,4 @@
-# Handover — auto-generated 2026-06-24 08:04
+# Handover — auto-generated 2026-06-26 18:15
 
 > Git facts written by pre-compact-handover.sh. Session Notes are Claude-owned.
 > See context/progress.md and context/structure.md for full state.
@@ -8,41 +8,43 @@ feature/profit-maker-agent
 
 ## Files In Flight
 ```
- M context/structure.md
-?? backend/data/agent_ttest.db
-?? backend/data/agent_ttest2.db
+ M context/handover.md
 ```
 
 ## Recent Commits
 ```
-9be5c55 tune(maker): leg $65, SOMI inventory cap $90
-28b2894 feat: start/stop control + flatten-to-USDso + $100 auto-stop
-6d226ad docs: add .env.example for the V3 profit-maker approach
-c81ba68 style(monitor): rename feed to DreamDEX V3, market preview every 2h
-879ecc3 feat(monitor): relay Gemini reasoning + market preview; tidy summary
+22a1f11 fix(inventory): make base holdings authoritative from chain, not fill counter
+e2d8f4f fix(maker): trend guard fails open with no history so chosen pairs can trade
+70f8258 config: trade WBTC+WETH only, exclude SOMI (grind-bleed)
+341dfea fix: monitor values coins via EMA fallback; trend guard fails safe
+37a684b fix(monitor): clamp glitchy book mids to sane band + last-good fallback
 ```
 
 ## Session Notes
-**🟢 V3 profit-maker is LIVE on mainnet.** Bounded two-sided market maker. Full state + known issues + deploy notes in `context/progress.md` (LIVE section). R2 burst code archived in `backend/archive/` (`ARCHIVE.md`).
+**🛑 BOT FULLY STOPPED — capital-preservation mode (2026-06-26).** Both containers `Exited` on server. Funds parked on-chain: **~$137.74 USDso + ~19.5 SOMI ≈ $140**. Real PnL ≈ **−$10** (vs $150) / **−$15** (vs 150+50SOMI at today's price). Money is in the wallet, NOT tied to containers. Full detail in `context/progress.md`.
 
-### Deployment (server `irony@100.80.130.21`)
-- Dir is **`~/dreamdex-r3`** (old `~/dreamdex-agent` REMOVED). Branch `feature/profit-maker-agent`. Containers: `dreamdex-agent` + `dreamdex-monitor`.
-- Redeploy: `cd ~/dreamdex-r3 && git pull -q origin feature/profit-maker-agent && cd backend && docker compose up -d --build [agent|monitor]`. Config baked into image → **rebuild needed for code/config changes**; monitor-only changes → `--build monitor` (agent untouched).
-- SSH: `ssh -o ControlPath=none -o ConnectTimeout=30 -o BatchMode=yes irony@100.80.130.21 '<short cmd>'`.
-- Wallet `0xD84fE2a2220f0269e3d88dab908ADceb2d691E76` (registered, funded 150 USDso + 50 SOMI). Key in `~/dreamdex-r3/backend/.env` `MAINNET_PRIVATE_KEY`; verified derives the wallet.
+### Why we stopped (key decisions)
+- **Can't win:** ranking is by effective volume = raw × (1+PnL%), and RAW VOLUME DOMINATES. We're #4/6 (effVol 884 vs leaders 12k–53k); top-2 unreachable. Leaders did 16–130× our volume.
+- **Can't profit:** sustained bear (SOMI −40%/30d, BTC −22%, ETH −26%). No chop to capture, can't short on spot → any trading loses (toll + grind). The ~$13 we lost = gas + buy-high/sell-low across restart/experiment churn.
+- **Dev clarified:** final PnL = convert ALL funds to USDso at contest END. So holding inventory is neutral until the end; only end-liquidation value counts (NOT the live free-USDso snapshot).
+- → Goal = keep the money. Hold stablecoin, stop trading.
 
-### Strategy / config (live)
-- Pairs **SOMI 80% / WBTC 20%** (WETH dropped — 1.4bps too tight). Leg **$65**, inv cap **SOMI $90 / WBTC $22**, reserve $20, margin 1 tick (sell ≥ cost+margin = no realized loss). SOMI ~10bps is the only capturable spread.
-- Strategist: **Gemini 2.5 Pro via Vertex ADC** (project `project-8feccae3-bcae-4254-b60`, ADC file mounted `/app/adc.json` from host `~/.config/gcloud/...`; gcloud CLI NOT needed at runtime).
-- Telegram (token+chat in .env): **/stop** (flatten to USDso + idle), **/start**, **/status**. Auto-stop if total value < **$100**. Monitor computes OUR PnL (realized+unrealized vs $150); leaderboard used ONLY for vol/rank.
+### To RESTART (only if market turns / user says go)
+- Server `irony@100.80.130.21`, dir `~/dreamdex-r3`, branch `feature/profit-maker-agent`. SSH: `ssh -o ControlPath=none -o ConnectTimeout=30 -o BatchMode=yes irony@100.80.130.21 '<cmd>'`.
+- Start: `cd ~/dreamdex-r3/backend && docker compose up -d agent` then set enabled=1 in DB (`agent_state`). Monitor stays OFF (avoids Telegram spam + it's separate from agent). Image already built with all fixes.
+- **CHECK `agent_state.enabled` BEFORE any restart** — if 0, a restart FLATTENS inventory (sells to USDso). Wallet `0xD84fE2a2220f0269e3d88dab908ADceb2d691E76`, key in server `.env`.
 
-### Current live state (at handover)
-- Rank ~2/6, realized PnL **+0.15**, holding ~$40 SOMI inventory (small unrealized −), gas ~49.9 SOMI. PnL ~flat = winning profile (beat the bleeders; trader-3 bled to −$108).
+### Live config now (server .env + config.py)
+- Pairs **WBTC + WETH only** (SOMI EXCLUDED — gradual grind kept bleeding). alloc 0.5/0.5. `MAKER_MAX_INV_USD=20`, `STRATEGIST_ENABLED=false` (no Gemini tokens), `TREND_LOOKBACK_S=86400`, `TREND_GUARD_PCT=0.015`, stop-loss 10% limit-protected, keepalive `KEEPALIVE_LEG_USD=1`.
 
-### GOTCHAS (V3-specific, hard-won this session)
-- **Native SOMI pool place AND cancel need gas LIMIT ≥5M** (InsufficientGasForPayout guard; actual use tiny) — handled via `gas_min`/`min_gas`. ERC20-payout (USDso) ops fine at 3M.
-- **Fill detection:** wallet-funded order RESERVES funding token at placement (looks like a fill on balance delta). Detect BUY fill by BASE received, SELL by USDso received; two-sided uses `get_open_orders` `remaining` (reservation ≠ fill).
-- `cancel_order` now verifies receipt (was reporting false "cancelled" while tx reverted → stuck orders).
-- Leaderboard `pnl` = free USDso − 150 only (ignores open orders + inventory → phantom loss). Ignore it.
-- Local: `.venv` at `backend/.venv`; **bash cwd resets to repo root between calls → use absolute paths or `cd` inside the command**.
-- Stray untracked test DBs `backend/data/agent_ttest*.db` — safe to delete.
+### Fixes shipped this session (all committed)
+- Monitor reports REAL net worth from on-chain (not desynced tracker) + sane-band price clamp + on-chain EMA price fallback (killed false −$7/−$36/−$10 cards).
+- Agent: trend guard (pause buy when down >1.5%/24h, fails open w/ no history) + keepalive; auto-stop reads on-chain value; **`Inventory.sync_base()` — agent holdings now CHAIN-authoritative each tick (ERC20 pairs), killing the fill-tracker desync** (verified: corrected phantom 0.00022 WBTC → 0).
+
+### GOTCHAS
+- Leaderboard `pnl`/`usdsoBalance` = free USDso only → undercounts inventory. Trust on-chain net worth (wallet + vault `getWithdrawableBalance`; vault CONFIRMED EMPTY this session).
+- Fill-tracker desyncs; now mitigated by `sync_base` for ERC20. Native SOMI still tracker-based (gas+inventory commingled on-chain, can't separate).
+- Trend guard catches CLIFFS not SLOPES (>1.5%/24h); gradual grind slips under → trading still bleeds. Only zero-bleed = cash.
+- Native SOMI pool place+cancel need gas ≥5M; ERC20-payout fine at 3M.
+- One-off container test (agent stopped): `docker compose run --rm --no-deps -T agent python3 -` < localscript.py (pipe via stdin — avoids inline-quoting hell; inline f-strings can't contain backslashes).
+- Local: bash cwd resets to repo root between calls → absolute paths or `cd` inside the command.
