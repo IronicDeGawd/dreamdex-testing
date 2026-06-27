@@ -67,9 +67,11 @@ RESERVE_USDSO      = float(os.environ.get("RESERVE_USDSO", 20.0))  # held untouc
 # Contest-eligible pairs we actually quote. SOMI EXCLUDED — its gradual grind
 # kept slipping under the trend guard and bled via inventory accumulation. Trade
 # only WBTC + WETH (lower-volatility majors); trend guard still gates both.
-ELIGIBLE_PAIRS     = ["WBTC:USDso", "WETH:USDso"]
+# Override via ELIGIBLE_PAIRS env (comma-separated) to scope a run, e.g. "WETH:USDso".
+ELIGIBLE_PAIRS     = [p.strip() for p in os.environ.get("ELIGIBLE_PAIRS", "WBTC:USDso,WETH:USDso").split(",") if p.strip()]
 # Working-capital allocation per pair (fractions of the non-reserve balance).
-MAKER_PAIR_ALLOC   = {"WBTC:USDso": 0.5, "WETH:USDso": 0.5}
+_DEFAULT_ALLOC     = {"WBTC:USDso": 0.5, "WETH:USDso": 0.5, "SOMI:USDso": 0.5}
+MAKER_PAIR_ALLOC   = {p: _DEFAULT_ALLOC.get(p, 1.0 / max(1, len(ELIGIBLE_PAIRS))) for p in ELIGIBLE_PAIRS}
 
 # Two-sided PostOnly market-making
 MAKER_LEG_USD      = float(os.environ.get("MAKER_LEG_USD", 65.0))   # USDso notional per resting leg
