@@ -102,15 +102,20 @@ def load_inventory() -> tuple[dict, float]:
 
 
 def mid_ago(pair: str, lookback_s: float):
-    """The most recent recorded mid for `pair` at or before (now - lookback_s),
-    for trend detection. None if we have no history that far back."""
+    """The most recent recorded mid for `pair` near (now - lookback_s), for trend
+    detection. STALENESS-BOUNDED: the sample must fall within one lookback window
+    before the cutoff, i.e. ts in [now-2*lookback, now-lookback]. Across a data gap
+    (the agent was stopped) there is no such sample → returns None → caller fails
+    OPEN, rather than handing back an ancient price that looks like a fake crash."""
     try:
-        cutoff = time.time() - lookback_s
+        now = time.time()
+        cutoff = now - lookback_s
+        floor = cutoff - lookback_s            # reject samples older than 2*lookback
         with _connect() as conn:
             r = conn.execute(
                 "SELECT mid FROM quote_context WHERE pair=? AND mid IS NOT NULL "
-                "AND ts<=? ORDER BY ts DESC LIMIT 1",
-                (pair, cutoff),
+                "AND ts<=? AND ts>=? ORDER BY ts DESC LIMIT 1",
+                (pair, cutoff, floor),
             ).fetchone()
             return float(r["mid"]) if r and r["mid"] is not None else None
     except Exception as e:
