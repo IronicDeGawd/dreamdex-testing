@@ -97,10 +97,25 @@ if PREAPPROVE:
 
 vol = 0.0; trips = 0; consec_fail = 0
 def stop(reason):
+    # auto-flatten: never exit holding a bag (e.g. a sell leg killed by a network
+    # blip). Sell any residual base back into the bid before reporting + exiting.
+    b = bb()
+    if b > MINQ:
+        for attempt in range(3):
+            try:
+                ob = dex.get_orderbook(PAIR)
+                if not ob.get("bid"): break
+                dex.place_order(PAIR, "sell", snap_lot(b), order_type="ioc",
+                                limit_price=round(ob["bid"]*(1-SLIP_PCT*(attempt+1)), 2), funding="wallet")
+                time.sleep(3)
+                b = bb()
+                if b <= MINQ: break
+            except Exception as e:
+                print(f"  auto-flatten attempt {attempt} failed: {e}"); time.sleep(2)
     u,b,s = ub(),bb(),sb()
     print(f"\n=== STOP: {reason} ===")
     print(f"trips={trips} volume=${vol:.2f} USDso_bleed=${u_start-u:.4f} gas={s_start-s:.4f} SOMI residual_base={b:.6f}")
-    if b > MINQ: print(f"!! WARNING residual base {b:.6f} — NOT flat, flatten manually")
+    if b > MINQ: print(f"!! WARNING residual base {b:.6f} — auto-flatten did not clear it, flatten manually")
     raise SystemExit(0)
 
 for i in range(MAX_ITERS):
