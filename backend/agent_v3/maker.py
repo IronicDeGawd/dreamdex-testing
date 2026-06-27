@@ -194,14 +194,14 @@ class PairMaker:
         quote_avail = self.inv.working_capital(self.capital_fn()) * self.alloc
         out: dict = {}
 
-        # Trend guard: spread capture needs a two-way book. If this coin fell more
-        # than TREND_GUARD_PCT over the lookback, it's a one-way downtrend — pause
-        # BUYING (don't catch the knife / accumulate a bleeding bag). SELL stays on.
+        # Trend guard (legacy, mid_ago-based). When MAKER_HOLD_MODE is on, the
+        # candles-based 24h gate in _tick is the trend authority (reliable OHLC, no
+        # gaps), so this is SKIPPED — and we deliberately keep buying dips within an
+        # uptrend. Only used in legacy (hold-mode off) runs. mid_ago is now staleness-
+        # bounded (returns None across data gaps → fails open) so it can't false-fire.
         trend_down = False
-        if config.TREND_GUARD_PCT > 0:
+        if config.TREND_GUARD_PCT > 0 and not config.MAKER_HOLD_MODE:
             m_ago = ctx.mid_ago(self.pair, config.TREND_LOOKBACK_S)
-            # No history → fail OPEN (allow trading); the small inventory cap + the
-            # 10% stop-loss bound the risk. Once history exists, pause on a downtrend.
             if m_ago is not None and mid < m_ago * (1 - config.TREND_GUARD_PCT):
                 trend_down = True
 
