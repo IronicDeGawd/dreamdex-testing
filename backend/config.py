@@ -93,6 +93,17 @@ TREND_GUARD_PCT   = float(os.environ.get("TREND_GUARD_PCT", 0.015))   # 1.5% dro
 TREND_LOOKBACK_S  = int(os.environ.get("TREND_LOOKBACK_S", 3600))     # compare mid to ~1h ago
 KEEPALIVE_LEG_USD = float(os.environ.get("KEEPALIVE_LEG_USD", 1.0))   # tiny buy to reset the idle clock when trend-guarded into cash (avoids 24h DQ)
 
+# Maker+hold mode (trend-gated). Calibration showed: in a sell-skewed market a maker
+# just accumulates a bag (the trap sinking rivals). So gate the WHOLE maker on the
+# 24h candle trend — only HOLD inventory when the trend is up/flat; in a confirmed
+# DOWNtrend, FLATTEN to USDso and idle (protects the live free-USDso multiplier),
+# leaving the flat-churn engine (volume_climb.py) to defend rank. Hysteresis via the
+# dead-band between DOWN and UP thresholds avoids flip-flop churn. Off by default.
+MAKER_HOLD_MODE     = os.environ.get("MAKER_HOLD_MODE", "0") == "1"
+MAKER_TREND_UP_PCT  = float(os.environ.get("MAKER_TREND_UP_PCT", 0.02))    # 24h >= +2% → UP (hold/make)
+MAKER_TREND_DOWN_PCT= float(os.environ.get("MAKER_TREND_DOWN_PCT", -0.01)) # 24h <= -1% → DOWN (flatten+idle)
+MAKER_TREND_CACHE_S = int(os.environ.get("MAKER_TREND_CACHE_S", 300))      # cache candle fetch (don't hit REST every tick)
+
 # Gas management (50 SOMI given, no refills — convert own USDso for more)
 GAS_RESERVE_SOMI    = float(os.environ.get("GAS_RESERVE_SOMI", 5.0))   # floor before forced refuel
 GAS_REFUEL_USDSO    = float(os.environ.get("GAS_REFUEL_USDSO", 5.0))   # USDso→SOMI per refuel (from working capital)
