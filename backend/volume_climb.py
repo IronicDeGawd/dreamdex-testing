@@ -104,14 +104,14 @@ def stop(reason):
     raise SystemExit(0)
 
 for i in range(MAX_ITERS):
-    if vol >= TARGET_VOLUME: stop("target volume reached")
-    s_now, u_now = sb(), ub()
-    if s_start - s_now >= MAX_GAS_SOMI: stop("max gas hit")
-    if s_now <= SOMI_FLOOR: stop("SOMI floor hit")
-    if u_start - u_now >= MAX_USDSO_BLEED: stop("max USDso bleed hit")
-    if consec_fail >= MAX_CONSEC_FAIL: stop(f"{MAX_CONSEC_FAIL} consecutive failures")
-
     try:
+        # cap checks inside try so a transient RPC/DNS blip is caught + retried, not fatal
+        if vol >= TARGET_VOLUME: stop("target volume reached")
+        s_now, u_now = sb(), ub()
+        if s_start - s_now >= MAX_GAS_SOMI: stop("max gas hit")
+        if s_now <= SOMI_FLOOR: stop("SOMI floor hit")
+        if u_start - u_now >= MAX_USDSO_BLEED: stop("max USDso bleed hit")
+        if consec_fail >= MAX_CONSEC_FAIL: stop(f"{MAX_CONSEC_FAIL} consecutive failures")
         if bb() > MINQ:
             stop(f"unexpected base inventory at trip start {bb():.6f}")
         ob = dex.get_orderbook(PAIR)
