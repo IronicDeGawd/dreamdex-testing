@@ -43,6 +43,7 @@ class PairMaker:
         self.orders: dict[str, dict | None] = {"buy": None, "sell": None}
         self._reenter_after = 0.0          # epoch; buy side paused until this (post stop-loss)
         self._start_ts = time.time()       # idle baseline before any trade history exists
+        self._hold_mode = "neutral"        # maker+hold trend mode: up | neutral | down (hysteresis state)
 
     # ── helpers ───────────────────────────────────────────────────────────
     @staticmethod
@@ -156,8 +157,31 @@ class PairMaker:
             self.inv.sync_base(self.pair, self._onchain_base())   # holdings = chain truth, not the drifting counter
             if self._check_stop_loss(snap):    # position underwater past the stop → cut + cooldown
                 return
+        # Maker+hold trend gate: only HOLD inventory in up/flat markets. In a confirmed
+        # 24h DOWNtrend, flatten to USDso and idle — don't accumulate the bag (the trap).
+        if config.MAKER_HOLD_MODE and not self.dry_run and self._hold_trend_mode() == "down":
+            if self.inv.base(self.pair) > (snap.get("minq") or 0.0):
+                self._flatten(snap)            # cut the bag back to USDso (protects the live multiplier)
+            elif self.orders["buy"] or self.orders["sell"]:
+                self._cancel_open()            # already flat → just stop quoting
+                self.orders = {"buy": None, "sell": None}
+            return
         desired = self._desired(snap, params)
         self._reconcile(desired, snap)
+
+    def _hold_trend_mode(self) -> str:
+        """24h candle trend with hysteresis: UP at >= MAKER_TREND_UP_PCT, DOWN at
+        <= MAKER_TREND_DOWN_PCT, otherwise hold the prior mode (dead-band = no flip-flop).
+        None/unknown trend leaves the mode unchanged."""
+        pct = self.md.trend_pct_24h(self.pair)
+        if pct is None:
+            return self._hold_mode
+        if pct >= config.MAKER_TREND_UP_PCT:
+            self._hold_mode = "up"
+        elif pct <= config.MAKER_TREND_DOWN_PCT:
+            self._hold_mode = "down"
+        # else: between thresholds → keep previous mode (hysteresis)
+        return self._hold_mode
 
     def _desired(self, snap, params) -> dict:
         """Target {side: (price, qty)} given inventory, caps, and no-loss rule."""

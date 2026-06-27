@@ -5,6 +5,7 @@ maker quotes around. Volatility is the stdev of recent mid returns in bps, used
 to widen the spread when the market is moving.
 """
 import statistics
+import time
 from collections import deque
 
 import config
@@ -15,6 +16,29 @@ class MarketData:
         self.dex = dex
         self._mids: dict[str, deque] = {}
         self._history_len = history_len
+        self._trend_cache: dict[str, tuple] = {}   # pair -> (ts, pct_24h)
+
+    def trend_pct_24h(self, pair: str):
+        """24h price change from DreamDEX candles (last close vs ~24h-ago close).
+        Cached for MAKER_TREND_CACHE_S so the per-tick maker doesn't hammer REST.
+        Returns a float fraction (e.g. +0.04 = +4%) or None if unavailable."""
+        now = time.time()
+        hit = self._trend_cache.get(pair)
+        if hit and now - hit[0] < config.MAKER_TREND_CACHE_S:
+            return hit[1]
+        pct = None
+        try:
+            c = self.dex.get_candles(pair, interval="1h", limit=48)
+            if c and len(c) >= 2:
+                last = float(c[-1]["close"])
+                idx = max(0, len(c) - 1 - 24)
+                old = float(c[idx]["close"])
+                if old > 0:
+                    pct = (last - old) / old
+        except Exception as e:
+            print(f"[market_data] trend {pair} failed: {e}", flush=True)
+        self._trend_cache[pair] = (now, pct)
+        return pct
 
     def snapshot(self, pair: str) -> dict | None:
         """Live book snapshot for `pair`, or None if the book is unusable."""

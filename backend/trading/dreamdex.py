@@ -199,6 +199,23 @@ class DreamDEX:
             print(f"[DreamDEX] trades error {symbol}: {e}")
         return []
 
+    def get_candles(self, symbol: str, interval: str = "1h", limit: int = 48) -> list:
+        """OHLCV candles for a market (oldest→newest). Each: {open,high,low,close,
+        volume,timestamp}. Used for the maker+hold trend gate. Returns [] on error."""
+        try:
+            r = self._session.get(
+                f"{self.base_url}/v0/markets/{symbol}/candles",
+                params={"interval": interval, "limit": limit},
+                timeout=6,
+            )
+            if r.status_code == 200:
+                d = r.json()
+                c = d.get("candles", d) if isinstance(d, dict) else d
+                return sorted(c, key=lambda x: x.get("timestamp", 0)) if isinstance(c, list) else []
+        except Exception as e:
+            print(f"[DreamDEX] candles error {symbol}: {e}")
+        return []
+
     def get_orderbook(self, symbol: str) -> dict:
         """Best bid / best ask from REST orderbook. Returns
         {'bid': float|None, 'ask': float|None, 'bid_qty': ..., 'ask_qty': ...}.
