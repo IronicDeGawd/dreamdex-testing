@@ -96,6 +96,22 @@ if PREAPPROVE:
     ensure_allowance(BASE,  BDEC, TARGET_VOLUME/1000.0)
 
 vol = 0.0; trips = 0; consec_fail = 0
+# Cost-aware mode (week-2 capital efficiency): generate volume only while it's cheap.
+# SPREAD_GATE: skip a trip when the live spread is too wide. COST_CEIL: pause when the
+# rolling realized $/1k climbs over the ceiling. Both 0 = disabled (plain full burst).
+from collections import deque
+COST_CEIL_PER_1K = float(os.environ.get("CLIMB_COST_CEIL_PER_1K", "0"))
+SPREAD_GATE_PCT  = float(os.environ.get("CLIMB_SPREAD_GATE_PCT", "0"))
+PAUSE_EXP_S      = float(os.environ.get("CLIMB_PAUSE_EXP_S", "30"))
+COST_WINDOW      = int(os.environ.get("CLIMB_COST_WINDOW", "15"))
+_costs = deque(maxlen=COST_WINDOW)
+try:
+    _sob = dex.get_orderbook("SOMI:USDso")
+    SOMI_PX = (_sob["bid"]+_sob["ask"])/2 if _sob.get("bid") and _sob.get("ask") else 0.10
+except Exception:
+    SOMI_PX = 0.10
+print(f"cost-aware: spread_gate={SPREAD_GATE_PCT}% cost_ceil=${COST_CEIL_PER_1K}/1k window={COST_WINDOW} somi_px={SOMI_PX:.4f}")
+
 def stop(reason):
     # auto-flatten: never exit holding a bag (e.g. a sell leg killed by a network
     # blip). Sell any residual base back into the bid before reporting + exiting.
@@ -133,6 +149,9 @@ for i in range(MAX_ITERS):
         if not ob["bid"] or not ob["ask"]:
             print(f"[{i}] empty book"); consec_fail += 1; time.sleep(PAUSE_S); continue
         mid = (ob["bid"]+ob["ask"])/2
+        spread_pct = (ob["ask"]-ob["bid"])/mid*100
+        if SPREAD_GATE_PCT > 0 and spread_pct > SPREAD_GATE_PCT:
+            print(f"[{i}] spread {spread_pct:.3f}% > gate {SPREAD_GATE_PCT}% — pause {PAUSE_EXP_S:.0f}s"); time.sleep(PAUSE_EXP_S); continue
         qty = snap_lot(LEG_USD/mid)
         buy_lim  = round(ob["ask"]*(1+SLIP_PCT), 2)
         sell_lim = round(ob["bid"]*(1-SLIP_PCT), 2)
@@ -153,9 +172,14 @@ for i in range(MAX_ITERS):
             if resid > MINQ:
                 stop(f"SELL failed twice — residual {resid:.6f} (bag)")
 
-        vol += got*mid*2; trips += 1; consec_fail = 0
+        vt = got*mid*2
+        vol += vt; trips += 1; consec_fail = 0
         u,s = ub(), sb()
-        print(f"[{i}] trip {trips}: vol+=${got*mid*2:.2f} tot=${vol:.2f} USDso={u:.4f}(bleed ${u_start-u:.4f}) SOMI={s:.4f}(gas ${s_start-s:.4f})")
+        cost_1k = ((u_now-u) + (s_now-s)*SOMI_PX)/vt*1000 if vt > 0 else 0.0
+        _costs.append(cost_1k); roll = sum(_costs)/len(_costs)
+        print(f"[{i}] trip {trips}: vol+=${vt:.2f} tot=${vol:.2f} USDso={u:.4f}(bleed ${u_start-u:.4f}) SOMI={s:.4f} | cost ${cost_1k:.3f}/1k roll ${roll:.3f}/1k")
+        if COST_CEIL_PER_1K > 0 and len(_costs) >= max(3, COST_WINDOW//2) and roll > COST_CEIL_PER_1K:
+            print(f"[{i}] rolling cost ${roll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k — PAUSE {PAUSE_EXP_S:.0f}s"); time.sleep(PAUSE_EXP_S); _costs.clear()
         time.sleep(PAUSE_S)
     except SystemExit:
         raise
