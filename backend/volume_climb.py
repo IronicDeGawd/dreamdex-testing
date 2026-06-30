@@ -112,6 +112,19 @@ except Exception:
     SOMI_PX = 0.10
 print(f"cost-aware: spread_gate={SPREAD_GATE_PCT}% cost_ceil=${COST_CEIL_PER_1K}/1k window={COST_WINDOW} somi_px={SOMI_PX:.4f}")
 
+# Telegram notifications via the agent's configured bot (milestones, pause, resume).
+TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", ""); TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
+TG_MS = float(os.environ.get("CLIMB_TG_MILESTONE", "25000"))  # ping every N volume
+def tg(msg):
+    if not TG_TOKEN or not TG_CHAT: return
+    try:
+        import requests
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                      json={"chat_id": TG_CHAT, "text": msg}, timeout=10)
+    except Exception: pass
+_paused = False; _last_ms = 0.0
+tg(f"🚀 Volume run: {PAIR} target ${TARGET_VOLUME:,.0f}, leg ${LEG_USD:.0f}, cost-ceil ${COST_CEIL_PER_1K}/1k")
+
 def stop(reason):
     # auto-flatten: never exit holding a bag (e.g. a sell leg killed by a network
     # blip). Sell any residual base back into the bid before reporting + exiting.
@@ -132,6 +145,7 @@ def stop(reason):
     print(f"\n=== STOP: {reason} ===")
     print(f"trips={trips} volume=${vol:.2f} USDso_bleed=${u_start-u:.4f} gas={s_start-s:.4f} SOMI residual_base={b:.6f}")
     if b > MINQ: print(f"!! WARNING residual base {b:.6f} — auto-flatten did not clear it, flatten manually")
+    tg(f"🛑 Stopped: {reason} | vol ${vol:,.0f} | bleed ${u_start-u:.2f} | gas {s_start-s:.1f} SOMI | flat={'yes' if b<=MINQ else 'NO'}")
     raise SystemExit(0)
 
 for i in range(MAX_ITERS):
@@ -151,6 +165,7 @@ for i in range(MAX_ITERS):
         mid = (ob["bid"]+ob["ask"])/2
         spread_pct = (ob["ask"]-ob["bid"])/mid*100
         if SPREAD_GATE_PCT > 0 and spread_pct > SPREAD_GATE_PCT:
+            if not _paused: tg(f"⏸ Paused @ ${vol:,.0f} vol — spread {spread_pct:.3f}% > {SPREAD_GATE_PCT}% (wide)"); _paused = True
             print(f"[{i}] spread {spread_pct:.3f}% > gate {SPREAD_GATE_PCT}% — pause {PAUSE_EXP_S:.0f}s"); time.sleep(PAUSE_EXP_S); continue
         qty = snap_lot(LEG_USD/mid)
         buy_lim  = round(ob["ask"]*(1+SLIP_PCT), 2)
@@ -178,7 +193,12 @@ for i in range(MAX_ITERS):
         cost_1k = ((u_now-u) + (s_now-s)*SOMI_PX)/vt*1000 if vt > 0 else 0.0
         _costs.append(cost_1k); roll = sum(_costs)/len(_costs)
         print(f"[{i}] trip {trips}: vol+=${vt:.2f} tot=${vol:.2f} USDso={u:.4f}(bleed ${u_start-u:.4f}) SOMI={s:.4f} | cost ${cost_1k:.3f}/1k roll ${roll:.3f}/1k")
+        if _paused:
+            tg(f"▶️ Resumed @ ${vol:,.0f} vol — cost ${roll:.3f}/1k"); _paused = False
+        if vol >= _last_ms + TG_MS:
+            _last_ms = vol; tg(f"📊 +${vol:,.0f} vol | roll ${roll:.3f}/1k | USDso ${u:.0f} | gas {s_start-s:.1f} SOMI")
         if COST_CEIL_PER_1K > 0 and len(_costs) >= max(3, COST_WINDOW//2) and roll > COST_CEIL_PER_1K:
+            if not _paused: tg(f"⏸ Paused @ ${vol:,.0f} vol — cost ${roll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k"); _paused = True
             print(f"[{i}] rolling cost ${roll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k — PAUSE {PAUSE_EXP_S:.0f}s"); time.sleep(PAUSE_EXP_S); _costs.clear()
         time.sleep(PAUSE_S)
     except SystemExit:
