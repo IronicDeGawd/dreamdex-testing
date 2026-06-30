@@ -193,13 +193,13 @@ for i in range(MAX_ITERS):
         cost_1k = ((u_now-u) + (s_now-s)*SOMI_PX)/vt*1000 if vt > 0 else 0.0
         _costs.append(cost_1k); roll = sum(_costs)/len(_costs)
         print(f"[{i}] trip {trips}: vol+=${vt:.2f} tot=${vol:.2f} USDso={u:.4f}(bleed ${u_start-u:.4f}) SOMI={s:.4f} | cost ${cost_1k:.3f}/1k roll ${roll:.3f}/1k")
-        if _paused:
-            tg(f"▶️ Resumed @ ${vol:,.0f} vol — cost ${roll:.3f}/1k"); _paused = False
+        if _paused and (COST_CEIL_PER_1K <= 0 or roll <= COST_CEIL_PER_1K):
+            tg(f"▶️ Resumed @ ${vol:,.0f} vol — cost back to ${roll:.3f}/1k (under ceil)"); _paused = False
         if vol >= _last_ms + TG_MS:
             _last_ms = vol; tg(f"📊 +${vol:,.0f} vol | roll ${roll:.3f}/1k | USDso ${u:.0f} | gas {s_start-s:.1f} SOMI")
         if COST_CEIL_PER_1K > 0 and len(_costs) >= max(3, COST_WINDOW//2) and roll > COST_CEIL_PER_1K:
             if not _paused: tg(f"⏸ Paused @ ${vol:,.0f} vol — cost ${roll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k"); _paused = True
-            print(f"[{i}] rolling cost ${roll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k — PAUSE {PAUSE_EXP_S:.0f}s"); time.sleep(PAUSE_EXP_S); _costs.clear()
+            print(f"[{i}] rolling cost ${roll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k — PAUSE {PAUSE_EXP_S:.0f}s"); time.sleep(PAUSE_EXP_S)
         time.sleep(PAUSE_S)
     except SystemExit:
         raise
