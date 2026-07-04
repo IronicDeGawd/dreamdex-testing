@@ -17,7 +17,47 @@ import requests
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from web3 import Web3
+from web3.providers.rpc import HTTPProvider
+try:
+    from config import SOMNIA_RPCS
+except ImportError:  # older config without a failover pool
+    from config import SOMNIA_RPC as _RPC
+    SOMNIA_RPCS = [_RPC]
 from config import SOMNIA_RPC, CHAIN_ID, MY_ADDRESS, PRIVATE_KEY as _CONFIG_KEY
+
+
+class FailoverHTTPProvider(HTTPProvider):
+    """HTTPProvider that rotates across multiple RPC endpoints.
+
+    A single flaky node (timeout / connection reset / 5xx) is the top cause of
+    the volume engine's 5-consecutive-failure breaker tripping. On a transport
+    error we advance to the next endpoint and retry the SAME request, so the
+    caller only sees an error if EVERY node fails. JSON-RPC errors (revert,
+    nonce too low) come back as a normal response dict — those are real chain
+    answers, identical on every node, so they pass straight through without
+    failover. Sticks to the last good endpoint until it too fails."""
+
+    def __init__(self, endpoint_uris, **kwargs):
+        self._uris = list(endpoint_uris) or [None]
+        self._idx = 0
+        super().__init__(self._uris[0], **kwargs)
+
+    def make_request(self, method, params):
+        last_exc = None
+        n = len(self._uris)
+        for attempt in range(n):
+            i = (self._idx + attempt) % n
+            self.endpoint_uri = self._uris[i]
+            try:
+                resp = super().make_request(method, params)
+                if i != self._idx:
+                    print(f"[wallet] RPC failover → {self._uris[i]}")
+                self._idx = i  # stick here until it fails
+                return resp
+            except Exception as e:  # transport-level only; RPC errors return a dict
+                last_exc = e
+                continue
+        raise last_exc
 
 
 class SomniaWallet:
@@ -27,7 +67,9 @@ class SomniaWallet:
         self.address     = address or MY_ADDRESS
         self.chain_id    = CHAIN_ID
         self.private_key = private_key or _CONFIG_KEY  # set via TESTNET/MAINNET_PRIVATE_KEY env var
-        self.w3          = Web3(Web3.HTTPProvider(SOMNIA_RPC))
+        # Failover across the RPC pool; short per-request timeout so a hung
+        # node rotates fast instead of blocking a whole trip into the breaker.
+        self.w3          = Web3(FailoverHTTPProvider(SOMNIA_RPCS, request_kwargs={"timeout": 15}))
         # H3 fix: local nonce counter. Prevents multi-tx flows (approve → deposit → order)
         # from racing on `eth_getTransactionCount("pending")` when the RPC's pending pool
         # hasn't propagated between calls — that race silently drops the second tx.
