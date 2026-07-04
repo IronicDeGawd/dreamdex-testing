@@ -42,6 +42,11 @@ MAX_ITERS       = int(os.environ.get("CLIMB_MAX_ITERS", "1300"))
 PAUSE_S         = float(os.environ.get("CLIMB_PAUSE_S", "0.4"))
 PREAPPROVE      = os.environ.get("CLIMB_PREAPPROVE", "1") == "1"
 MAX_CONSEC_FAIL = 5
+# Thin-book sell resilience: a residual after the first two sells means the bid
+# briefly lacked depth, not a fault. Pause and retry the residual with widening
+# slippage, waiting for the book to refill, before ever giving up with a bag.
+RESID_RETRIES   = int(os.environ.get("CLIMB_RESID_RETRIES", "8"))
+RESID_WAIT_S    = float(os.environ.get("CLIMB_RESID_WAIT_S", "4"))
 
 mkt = config.MARKETS[PAIR]
 BASE = mkt["base"]; BDEC = int(mkt["baseDecimals"])
@@ -184,8 +189,27 @@ for i in range(MAX_ITERS):
         if resid > MINQ:
             rs2 = dex.place_order(PAIR,"sell",snap_lot(resid),order_type="ioc",limit_price=round(ob["bid"]*(1-SLIP_PCT*3),2),funding="wallet")
             resid = poll_base(MINQ, want_above=False)
+        if resid > MINQ:
+            # Thin bid: don't hard-stop on a momentary lack of depth. Pause, let the
+            # book refill, and retry the residual with widening slippage. Only give
+            # up (stop with a bag) after RESID_RETRIES patient attempts.
+            if not _paused:
+                tg(f"⏸ Paused @ ${vol:,.0f} vol — thin book, retrying sell of {resid:.4f} {PAIR.split(':')[0]}"); _paused = True
+            print(f"[{i}] residual {resid:.6f} — thin book, patient-retry up to {RESID_RETRIES}x")
+            for r in range(RESID_RETRIES):
+                time.sleep(RESID_WAIT_S)
+                try:
+                    ob2 = dex.get_orderbook(PAIR)
+                    if not ob2.get("bid"): continue
+                    dex.place_order(PAIR,"sell",snap_lot(resid),order_type="ioc",
+                                    limit_price=round(ob2["bid"]*(1-SLIP_PCT*(2+r)),2),funding="wallet")
+                except Exception as e:
+                    print(f"[{i}] resid-sell retry {r} err {str(e)[:80]}")
+                resid = poll_base(MINQ, want_above=False)
+                if resid <= MINQ:
+                    print(f"[{i}] residual cleared after {r+1} retr{'y' if r==0 else 'ies'}"); break
             if resid > MINQ:
-                stop(f"SELL failed twice — residual {resid:.6f} (bag)")
+                stop(f"SELL failed after {RESID_RETRIES} patient retries — residual {resid:.6f} (bag)")
 
         vt = got*mid*2
         vol += vt; trips += 1; consec_fail = 0
