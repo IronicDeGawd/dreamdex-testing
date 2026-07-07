@@ -133,15 +133,19 @@ tg(f"🚀 Volume run: {PAIR} target ${TARGET_VOLUME:,.0f}, leg ${LEG_USD:.0f}, c
 def stop(reason):
     # auto-flatten: never exit holding a bag (e.g. a sell leg killed by a network
     # blip). Sell any residual base back into the bid before reporting + exiting.
+    # Uses the same patient retry budget as the in-trip residual handler — a
+    # thin moment at the exact instant of stop() shouldn't leave a bag when the
+    # book would have refilled within a few more seconds.
     b = bb()
     if b > MINQ:
-        for attempt in range(3):
+        for attempt in range(max(3, RESID_RETRIES)):
             try:
                 ob = dex.get_orderbook(PAIR)
-                if not ob.get("bid"): break
+                if not ob.get("bid"):
+                    time.sleep(RESID_WAIT_S); continue
                 dex.place_order(PAIR, "sell", snap_lot(b), order_type="ioc",
                                 limit_price=round(ob["bid"]*(1-SLIP_PCT*(attempt+1)), 2), funding="wallet")
-                time.sleep(3)
+                time.sleep(max(3, RESID_WAIT_S))
                 b = bb()
                 if b <= MINQ: break
             except Exception as e:
