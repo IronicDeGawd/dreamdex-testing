@@ -1,175 +1,124 @@
 # DreamDEX Contest Agent + Smartwatch
 
-Autonomous on-chain trading agent built for the DreamDEX Spot DEX contest on Somnia mainnet, paired with an ESP32-C3 smartwatch UI. Finished **rank #4 of 11** with **~205k USDso volume** traded over the contest window.
+Autonomous on-chain trading agent for the **DreamDEX** spot DEX on the **Somnia**
+network, paired with an ESP32-C3 smartwatch UI. Run across multiple contest rounds.
 
-The contest was explicitly a stress test — the real deliverable is the protocol findings report and on-chain dataset produced during the run.
+**Round 3** (volume contest): finished **#2 of 6** on raw volume at **~1,086,202
+USDso**, and the **most capital-efficient** trader in the field (~98% fill,
+~$0.11 per 1k of volume). Full write-up in [`reports/R3-report.docx`](reports/R3-report.docx).
+
+**Round 1** (earlier): finished #4 of 11; the real deliverable there was a protocol
+findings report + on-chain dataset, preserved under [`reports/`](reports/).
 
 ---
 
-## What's in this repo
+## Repo layout
 
 ```
-backend/          Python + Flask agent backend (Docker)
-  agent/          Main trading loop + GPT-4o-mini brain
-  monitor/        SQLite persistence, portfolio, prices, leaderboard
-  trading/        DreamDEX REST wrapper + ManualTrader
-  static/         Single-file web dashboard (index.html)
-  direct_burst.py Direct-RPC burst engine (~5× faster than REST)
-  config.py       Markets, thresholds, constants
+backend/            Python trading engine (Docker)
+  volume_climb.py     Steady taker engine — WETH:USDso round-trips via REST; cost-aware
+  direct_burst.py     Fast taker engine — direct placeOrder(0x4e978373), ~2x faster
+  cheap.sh            Launcher: steady mode  (target, bleed_cap, leg, cost_ceil)
+  direct_burst.sh     Launcher: fast mode    (target, leg, slip, spread_gate)
+  agent_v3/           Profit maker: runner.py (entry), maker.py, market_data,
+                      inventory, gas, strategist (Gemini via Vertex), context_store,
+                      monitor_bot (Telegram alerts)
+  trading/            dreamdex.py (REST + calldata + fill tracking),
+                      wallet.py (signing + multi-RPC failover)
+  monitor/            db.py (SQLite); prices/portfolio/leaderboard (dashboard data)
+  static/             Web dashboard (index.html) — see context/plan/dashboard.md
+  config.py           Markets, RPC failover pool, thresholds
+  archive/            R1/R2 reference scripts (deprecated, do not run)
 
-firmware/         ESP32-C3 + SSD1306 OLED watch (Arduino)
-  watch.ino       All screens: prices, portfolio, agent, manual trade
-  wifi_secrets.example.h  Copy → wifi_secrets.h, fill in credentials
+docs/               RUNBOOK.md, WEB-DASHBOARD-SPEC.md
+reports/            Findings + analysis deliverables (R1) and R3 report
+  FINDINGS.md, *.docx, R3-report.docx, R3-transaction-report.md
+  analysis/           63,569-tx on-chain dataset + tooling
+  evidence/           Liquidity-blackout proof (block-pinned)
 
-analysis/         63,569 on-chain transactions scraped + analysed
-  scrape_trades.py   Blockscout v2 scraper
-  analyze_full.py    Fill-rate / PnL / revert stats
-  onchain_trades.db  SQLite (git-LFS or local only)
-  FULL-ANALYSIS.md   Key numbers
-
-evidence/         Liquidity blackout proof (8.9-min exchange-wide outage)
-  replay_book_state.py      Block-by-block book replay via archive node
-  find_blackout_edges.py    Pin exact start/end blocks
-  scan_blackout_history.py  24-h historical scan
-
-FINDINGS.md             7 protocol findings (send to dreamDEX team)
-DreamDEX-Findings.docx  Same, formatted
-DreamDEX-Trade-Analysis.docx  Trade dataset report
-RUNBOOK.md              Ops guide: start/stop/restart, common issues
+firmware/           ESP32-C3 + SSD1306 OLED watch (Arduino)
+context/            Dev context: plans, research, progress (working notes)
 ```
 
 ---
 
-## Architecture
+## The two R3 engines
 
-```
-ESP32 watch  ──HTTP──►  Flask server (port 5001)  ──►  DreamDEX REST API
-Web dashboard ──────►  (Cloudflare tunnel)           ──►  Somnia RPC (web3.py)
-                        │
-                        ├─ TradingAgent (main, $7–15, 120s loop)
-                        │    └─ Brain (GPT-4o-mini) → GRIND / PROFIT mode
-                        ├─ MicroAgent (brainless, $2–5, 90s loop)
-                        ├─ direct_burst.py (RPC-only, WETH:USDso, ~5× faster)
-                        ├─ LeaderboardMonitor (shared, 60s poll)
-                        └─ SQLite agent.db (trades, ticks, stats)
-```
+Both trade **WETH:USDso** taker round-trips (buy at ask, sell at bid), ending flat.
+Toll ≈ $0.11 per 1,000 of volume (the spread floor). Never run both at once — they
+share one wallet, so concurrent runs collide on the nonce.
 
-**Two execution paths:**
+| Engine | Launcher | How it places orders | Speed | Use for |
+|--------|----------|----------------------|-------|---------|
+| `volume_climb.py` | `cheap.sh` | DreamDEX REST `/orders` → sign → broadcast | ~30s/round-trip | Steady, cost-aware volume; holding a lead |
+| `direct_burst.py` | `direct_burst.sh` | Builds `placeOrder` calldata locally, broadcasts direct | ~15s (~2×) | Max throughput; closing a gap |
 
-| Path | How | Speed | Used for |
-|------|-----|-------|----------|
-| REST `/manual` | Flask builds tx → RPC broadcasts | ~1 tx/4s | Main agent, micro agent, watch manual trades |
-| `direct_burst.py` | Signs + broadcasts entirely in-process | ~5× faster | Volume burst; handles both native-SOMI and ERC20-WETH base |
+`volume_climb` is cost-aware: a spread gate skips wide books, a rolling `$/1k`
+ceiling pauses when the toll climbs, and it self-heals across RPC blips (multi-node
+failover). `direct_burst` verifies its calldata byte-for-byte against the REST path
+at startup, gates on spread, and is bag-proof (sells any residual before every buy).
+
+See [`context/research/dreamdex-r3-findings.md`](context/research/dreamdex-r3-findings.md)
+for the full engine playbook, economics, and the `placeOrder` discovery.
 
 ---
 
-## Key findings (see FINDINGS.md for full detail)
+## Running
 
-| ID | Finding |
-|----|---------|
-| A1 | `expireTimestampNs=0` silently rejected — always pass `(now + 3600) * 1e9` |
-| A2 | Native SOMI vault uses sentinel `0x28f34De…`, NOT `address(0)` |
-| A3 | `vault_withdraw` for native SOMI always reverts with `0x734b5f70` |
-| A4 | `OrderPlaced` event emits `filled=0` even on real fills |
-| A5 | `getOwnOpenOrders()` returns empty even with live resting orders |
-| A6 | `eth_call` sim produces ~47% false-negatives against live book state |
-| A7 | Exchange-wide liquidity blackout 2026-06-01 12:11–12:20 UTC (8.9 min, block-pinned) |
-
----
-
-## Dataset
-
-- **63,569 on-chain transactions** scraped from Blockscout v2 API
-- Fill rates: USDC.e **99.5%** · SOMI **83.6%** · WETH **72.4%**
-- WETH accounts for 84% of all reverts despite having the tightest spread (0.020% vs SOMI 0.132%)
-- 136 SOMI consumed in gas (~$22 at contest prices)
-- Net loss from $50 starting capital: ~$49 (all on spread + gas — no bugs, no losses)
-
----
-
-## Running locally
-
-### Prerequisites
-
-- Docker + Docker Compose
-- Python 3.11+ (for burst scripts run outside Docker)
-- Arduino IDE with ESP32 board support (for watch firmware)
-
-### Backend
-
+### Engines (on the trading server)
 ```bash
 cd backend
-cp .env.example .env        # fill in FLASK_API_KEY, RPC_URL, OPENAI_KEY, MAINNET_PRIVATE_KEY
-docker compose up -d --build
-docker compose logs -f agent
+# steady mode: target, bleed_cap, leg, cost_ceil
+nohup ./cheap.sh 100000 40 25 0.15 > /tmp/run.log 2>&1 &
+# fast mode: target, leg, slip, spread_gate
+nohup ./direct_burst.sh 100000 25 0.004 0.15 > /tmp/run.log 2>&1 &
 ```
+Editing an engine requires rebuilding the image (`docker compose build agent`) —
+the code is baked in. Launchers run detached and survive an SSH drop.
 
-The agent starts paused. Unpause via dashboard toggle or:
-```bash
-curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
-  -d '{}' http://localhost:5001/agent/toggle
-```
-
-### Dashboard
-
-Open `http://localhost:5001` in a browser. Enter the API key when prompted — it persists in `localStorage`.
-
-### Direct burst (optional, RPC-only)
-
+### Maker + Telegram monitor (Docker)
 ```bash
 cd backend
-BURST_PAIR=WETH:USDso BURST_USDSO=3 python3 direct_burst.py
-# or via wrapper:
-./run_direct_burst.sh
+cp .env.example .env    # wallet key, RPC, Vertex (Gemini), Telegram — never commit .env
+docker compose up -d --build     # runs agent_v3.runner + monitor_bot
 ```
 
 ### Watch firmware
-
-1. Copy `firmware/wifi_secrets.example.h` → `firmware/wifi_secrets.h`
-2. Fill in SSID, password, and `API_KEY`
-3. Set `BACKEND` to your server URL (Cloudflare tunnel or LAN IP)
-4. Flash `firmware/watch.ino` via Arduino IDE to an ESP32-C3
+Copy `firmware/wifi_secrets.example.h` → `wifi_secrets.h`, fill SSID/password/API
+key + backend URL, flash `firmware/watch.ino` to an ESP32-C3.
 
 ---
 
-## Configuration
+## Secrets
 
-All runtime constants live in `backend/config.py`:
-
-| Constant | Default | Description |
-|----------|---------|-------------|
-| `AGENT_MIN_TRADE` | 7.0 | Minimum trade size in USDso |
-| `AGENT_MAX_TRADE` | 15.0 | Maximum trade size in USDso |
-| `AGENT_STOP_BELOW` | 22.0 | Capital floor — agent pauses below this |
-| `DREAMDEX_ENV` | `mainnet` | `mainnet` or `testnet` |
-| `MARKETS` | — | Pool addresses, decimals, minQty per pair |
-
-`AGENT_STOP_BELOW` is also hardcoded in the watch firmware as `AGENT_FLOOR_USDSO` — change both together.
+All secrets live in `backend/.env` (gitignored) — wallet private key, RPC URLs,
+Vertex/Gemini creds, Telegram token. **This repo is public; never commit `.env`.**
 
 ---
 
-## Hard-won lessons (short version)
+## Historical: R1 findings & dataset
 
-- **Trade WETH:USDso.** Spread 0.020% vs SOMI 0.132% — 6.5× cheaper per $1k volume.
-- **Vault-funded IOC buys never fill on mainnet.** Use `fundingSource: wallet` only.
-- **`expireTimestampNs=0` is not "no expiry"** — it's silently rejected by the deployed contract.
-- **The deep order book is a single MM bot** (`0xe3Ef9c0F…`), not contestants. Wash trading is impossible.
-- **Capital floor check must read live RPC**, not the cached Portfolio — 60s staleness let the agent blow past the floor during a mid-cycle base-token accumulation.
-- **LLM prompts are suggestions; hard rules need code-level clamps.** `max(MIN, min(MAX, amt))` on trade size, not natural-language guidance.
+The R1 round doubled as a protocol stress test. Deliverables in [`reports/`](reports/):
 
-Full lessons log in `context/progress.md`.
+- **[`FINDINGS.md`](reports/FINDINGS.md)** — 7 protocol findings for the DreamDEX team
+  (e.g. `expireTimestampNs=0` silently rejected; native-SOMI vault sentinel address;
+  `OrderPlaced` emitting `filled=0` on real fills; ~47% `eth_call` false-negatives;
+  an 8.9-minute exchange-wide liquidity blackout).
+- **[`reports/analysis/`](reports/analysis/)** — 63,569 on-chain transactions scraped +
+  analyzed (fill rates, PnL, reverts).
+- **[`reports/evidence/`](reports/evidence/)** — block-by-block proof of the blackout.
+
+Hard-won lessons carry into every round: trade the tightest-spread pair (WETH),
+wallet-funded orders only (vault IOC never fills), read the capital floor from live
+RPC not a cache, and clamp trade size in code (LLM prompts are suggestions).
 
 ---
 
 ## Post-contest teardown
 
 ```bash
-ssh user@<SERVER_HOST>
-cd ~/dreamdex-agent
-docker compose down
-docker rmi dreamdex-agent:latest
+ssh <user>@<server>
+cd ~/dreamdex-r3/backend && docker compose down
 shred -u .env
-cd ~ && rm -rf ~/dreamdex-agent
 ```
-
-Also delete the Cloudflare tunnel published-app entry and rotate the private key.
+Rotate the wallet private key and remove any tunnel/DNS entries afterward.
