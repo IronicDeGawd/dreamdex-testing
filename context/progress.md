@@ -1,8 +1,17 @@
 # Progress — DreamDEX Contest Agent (Round 3)
 
-**STATUS 2026-06-26: 🛑 BOT FULLY STOPPED — CAPITAL PRESERVATION.** Both containers `Exited` on server. Funds parked on-chain: **~$137.74 USDso + ~19.5 SOMI ≈ $140**. Real PnL ≈ **−$10** (vs $150) / **−$15** (vs 150+50SOMI). Decision: STOP and hold stablecoin because (1) ranking is volume-dominated and we're #4/6 (effVol 884 vs leaders 12k–53k) — top-2 unreachable; (2) sustained bear (SOMI −40%/30d, BTC −22%, ETH −26%) → no profitable spot trade (no chop, can't short); (3) dev confirmed final PnL = convert all to USDso at contest END (holding inventory neutral until end). The ~$13 lost = gas + buy-high/sell-low across restart/experiment churn. **All V3 fixes shipped (see "V3 ISSUES — FULL LOG" below); images built but NOT started.** Restart only if market turns: `cd ~/dreamdex-r3/backend && docker compose up -d agent` + set `agent_state.enabled=1` (CHECK enabled BEFORE restart — 0 = flattens on boot).
+**STATUS: 🏁 R3 CONTEST ENDED 2026-07-07 15:00 UTC (~20:30 IST).** Final raw volume ~1.1M (climbed from 725.5k via direct_burst engine on final day). Liquidated all inventory to USDso. Wallet settled flat: ~$27.7 USDso + ~0.6 SOMI (gas reserve) + 0 WETH. Engine now stopped. Both volume_climb.py + direct_burst.py engines committed and ready for next round.
 
 > **R2 WON #1.** R3 scoring = Effective Volume = Raw × (1 + PnL%); wipe = 0; 14 days, $150 start + 50 SOMI gas, no top-ups, eligible BTC/ETH/SOMI (no stablecoin), >24h idle = DQ, milestones $25/500k EFFECTIVE vol (unreachable — leader ~53k), top-2 qualify.
+
+## Completed
+- 2026-07-07 21:00 — feat(direct_burst): direct-contract placeOrder(0x4e978373) engine with spread gate (2 files, +250 lines)
+- 2026-07-04 14:23 — feat(rpc): failover across multiple Somnia RPC endpoints (2 files, +30~5 lines)
+- 2026-06-30 07:30 — fix(volume_climb): honest pause/resume — keep cost window, resume only under ceil (1 file, 3±3 lines)
+- 2026-06-30 07:20 — feat(volume_climb): Telegram pings for milestones, pause, resume, stop (1 file, +20 lines)
+- 2026-06-30 07:10 — feat(volume_climb): cost-aware mode — spread gate + rolling $/1k pause (1 file, +26~2 lines)
+- 2026-06-30 06:50 — feat(config): env-overridable ELIGIBLE_PAIRS + alloc fallback (1 file, +4~2 lines)
+- 2026-06-30 06:40 — fix(maker): gap-safe trend signal; hold-mode supersedes legacy DB guard (2 files, +16~11 lines)
 
 ## V3 ISSUES — FULL LOG (2026-06-24 → 06-26)
 **Scoring / strategy realizations:**
@@ -54,6 +63,12 @@
 - **Old keys to rotate (R2, repo is PUBLIC):** wallet H `0xF4c825F3C2970153d78B407CF190861dd4E2b905`, wallet B `0x7571…A638` — treat as burned; rotate if reused. New R3 key must NEVER be committed (`env_file` only; never `git add -A`).
 
 ## Lessons (durable findings — preserved across rounds)
+- **R3 final findings (2026-07-07):**
+  1. **Trust on-chain reads from our own wallet, never one-off scripts or leaderboard snapshots.** Mid-race, leaderboard usdsoBalance reported ~$90 (cycle-phase artifact); real on-chain wallet was ~$270. We thought we were low, but we had 3× the displayed capital. Stale-replica reads can badly distort decisions. Use `audit_balances.py` pattern: read our wallet + vault `getWithdrawableBalance` + open orders on-chain each cycle.
+  2. **Leg size must shrink as free USDso shrinks or pre-revert.** Late-stage, free USDso dropped to ~$40; leg_usd stayed at $65 → placed orders exceeding balance → revert loops. The leg must be `min(target, free_usdso - reserve)` BEFORE encoding or the cycle stalls.
+  3. **The speed lever is the API /orders round-trip, not our sleeps.** volume_climb clocked ~15–20k/hr; direct_burst (bypassing /orders, using RPC placeOrder) clocked ~35–50k/hr (~2.5× faster). Our settle delays and re-checks cost milliseconds; the API round-trip costs seconds. Proof: burst pushed 375k volume in 2 days while climb would have taken a week.
+  4. **Never swap the order path live under time pressure without encoding self-check + bag-proof loop.** R2 tried placeTakerOrderWithoutVault (reverted silently mid-R2 after dev disabled it); direct_burst learned from that: startup encoding assert vs API's calldata + sell_all_weth at loop top + shutdown so no bag survives a crash.
+  5. **R2 direct script failed only because it called the wrong function.** placeTakerOrderWithoutVault (vault-funded, deprecated) not placeOrder (wallet-funded, selector 0x4e978373). Same speed lever, different signature. R3 got it right from day 1 (placeOrder).
 - **🌟 R3 score uses FREE USDso — held inventory is poison (verified 2026-06-24).** Effective volume = `rawVolume × (1 + (freeUSDso − 150)/150)`, matched to the dollar across all 6 traders. The PnL factor ignores open orders + base inventory. So a break-even bag still reads as a loss and divides down your whole raw volume. We sat at $49.93 free (rest in bags) → multiplier 0.33 → last place despite ~$149 real wealth. To rank, END CYCLES FLAT in USDso. Leader trader-3: 38k raw, −$29 (near-flat), 30,857 effective — almost certainly self-matching (zero fees + `selfMatchingOption=1`) to mint volume at gas-only cost. Our bounded no-loss maker optimizes the WRONG objective for this formula. See [[scoring-uses-free-usdso-inventory-is-poison]].
 - **🌟 slip on an IOC taker is FREE insurance, not a cost.** IOC fills at the BOOK touch, not your limit — a wide limit (slip) costs zero extra toll as long as your leg ≤ top-of-book depth; it only prevents misses from price drift. Tight slip=6 was a mistake (saved nothing, caused 36% misses). slip=50 → ~100% fill, same toll. Downside only if leg > touch depth (book-walking) or thin/flash-spike book → use MODERATE slip, not infinite.
 - **🌟 Ceiling vs Rate are DIFFERENT.** (1) **Ceiling** = capital ÷ spread ≈ capital × ~10k volume — INDEPENDENT of leg size. (2) **Rate** = legs/sec × leg_size, leg_size ∝ remaining capital → rate **DECAYS as capital bleeds, for EVERYONE.** Never assume an opponent sustains a fixed rate while you decay — they slow too (verified: t6 decayed ~46k/hr→~15k/hr as capital dropped $32→$26). With symmetric decay, a volume head-start usually holds.
@@ -121,10 +136,22 @@
 - **New engine = bounded two-sided MM** (`maker.py` rewritten): rest PostOnly bid+ask, capture spread; fills tracked via `get_open_orders` remaining (reservation ≠ fill on a two-sided book); SELL only ≥ avg_cost+margin (no realized loss); base inventory capped per pair. Pairs **SOMI 80% / WBTC 20%**, $25 legs, SOMI inv cap $40 / WBTC ~$10. Logic unit-tested (flat→buy-only, long→both sides, at-cap→sell-only). NEEDS testnet validation before mainnet redeploy.
 - **First mainnet attempt found + fixed:** lot-precision 400s; phantom buy-fills (USDso reservation misread → fixed: buys detect base received); native-pool cancels needed 5M gas + receipt verify. Agent currently STOPPED on server; wallet intact (150 USDso, 0 base, ~49.9 SOMI). Old R2 container removed; no R2 crons.
 
-## Resume From Here (2026-06-24 — READY TO DEPLOY, awaiting user "go")
-- **Green checklist:** engine built + testnet-validated (no stacking, clean shutdown, profitable SOMI+WETH round-trips, cancels fixed). Mainnet wallet `0xD84f…1E76` funded (on-chain: **50 SOMI + 150 USDso**) and registered. ADC verified on server (Vertex enabled, gemini-2.5-pro reachable, project `project-8feccae3-bcae-4254-b60`); strategist robust to transient 429.
-- **To launch (on server `irony@100.80.130.21`, dir `~/dreamdex-agent`, container currently down):** (1) deploy branch `feature/profit-maker-agent`; (2) set `.env`: `DREAMDEX_ENV=mainnet`, `MAINNET_PRIVATE_KEY` (present), `WALLET_ADDRESS=0xD84f…1E76`, `GOOGLE_CLOUD_PROJECT=project-8feccae3-bcae-4254-b60`, `STRATEGIST_ENABLED=true`; (3) `docker compose build && docker compose up -d`; (4) watch logs for strategist ping OK + maker quotes/fills. Server gcloud CLI is absent but NOT needed (google-genai reads the mounted ADC file).
-- **Then watch:** PnL stays ≥0 (multiplier), volume accrues, no >24h idle (DQ). 14-day window.
+## Resume From Here (2026-07-07 18:00 — R3 ENDED, Next Round Ready)
+- **R3 wrap-up:** Contest ended 2026-07-07 15:00 UTC (~20:30 IST). We finished at ~1.1M raw effective volume (off freeUSDso scoring multiplier ≈0.6–0.8, effective ~0.6–0.9M). Both `volume_climb.py` + `direct_burst.py` engines are final, committed, battle-tested. Full R3 findings + runbook saved to `context/research/dreamdex-r3-findings.md` (if created) or inline in this progress.md (Lessons section).
+- **Next round (when user says go):**
+  1. **Docker rebuild:** `cd backend && docker compose build agent` → bakes direct_burst.py + latest cost gate + volume_climb fixes into image.
+  2. **Pre-flight:** Confirm `.env` key (rotate if exposed), test RPC failover (primary + Ankr fallback), top up gas reserve ~150–200 SOMI + $150 USDso starting capital.
+  3. **Winning pattern:** Run burst-then-hold-climb: (1) burst for ~3–5 days to build a volume cushion above rivals (target: +300k raw); (2) switch to volume_climb (steady, cost-gated) to hold + protect capital into the final week.
+  4. **Capital allocation:** Start with $(150–200 USDso) split 50/50 WETH:USDso or 100% WETH if taker depth favors it. Maker (SOMI) only if 2-sided spread is >5bps and market oscillates (bear market = skip, go taker-only).
+  5. **Speed levers (proved in R3):**
+     - Leg size ≤ free USDso − $20 reserve (avoids reverts).
+     - Use direct_burst for burst phase (35–50k/hr vs climb's 15–20k/hr).
+     - Spread gate ≥2% to break on thin/flash books (don't burn gas on no-fills).
+     - Roll every 2–3 hours even if profitable (liquidate held bags, reset free USDso for multiplier).
+- **Monitoring:** 
+  - Leaderboard live at `https://dreamdex-leaderboard-new.vercel.app/api/leaderboard` (R3 endpoint).
+  - Real capital: `audit_balances.py` (on-chain wallet + vault).
+  - Cost tracking: Telegram alerts per cheap.sh phase (auto-pause if $/1k > ceiling).
 
 ## Resume From Here (2026-06-24 — R3 profit agent built, pre-validation)
 - **Done:** R3 rules saved (`context/plan/round3-rules.md`) + docs delta. Checkpointed R2 to `main` and pushed. New branch `feature/profit-maker-agent`. Archived all R2 code → `backend/archive/` + `ARCHIVE.md`. Built `backend/agent_v3/` (context_store, market_data, inventory, gas, strategist, maker, runner), updated `config.py` for R3, added `gas_min`/`min_gas` 5M-gas passthrough to `dreamdex.py`/`wallet.py`, repointed Dockerfile/compose. All modules import clean.

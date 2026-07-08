@@ -1,4 +1,4 @@
-# Handover — auto-generated 2026-06-26 18:15
+# Handover — auto-generated 2026-06-30 21:17
 
 > Git facts written by pre-compact-handover.sh. Session Notes are Claude-owned.
 > See context/progress.md and context/structure.md for full state.
@@ -9,42 +9,42 @@ feature/profit-maker-agent
 ## Files In Flight
 ```
  M context/handover.md
+ M context/progress.md
+ M context/structure.md
+?? context/plan/maker-hold-engine.md
+?? context/plan/r3-volume-climb.md
 ```
 
 ## Recent Commits
 ```
-22a1f11 fix(inventory): make base holdings authoritative from chain, not fill counter
-e2d8f4f fix(maker): trend guard fails open with no history so chosen pairs can trade
-70f8258 config: trade WBTC+WETH only, exclude SOMI (grind-bleed)
-341dfea fix: monitor values coins via EMA fallback; trend guard fails safe
-37a684b fix(monitor): clamp glitchy book mids to sane band + last-good fallback
+b7e04bc fix(volume_climb): honest pause/resume — keep cost window, resume only under ceil
+766c8ce feat(volume_climb): Telegram pings for milestones, pause, resume, stop
+965c073 feat(volume_climb): cost-aware mode — spread gate + rolling $/1k pause
+58dd646 feat(config): env-overridable ELIGIBLE_PAIRS + alloc fallback
+2b6b45c fix(maker): gap-safe trend signal; hold-mode supersedes legacy DB guard
 ```
 
 ## Session Notes
-**🛑 BOT FULLY STOPPED — capital-preservation mode (2026-06-26).** Both containers `Exited` on server. Funds parked on-chain: **~$137.74 USDso + ~19.5 SOMI ≈ $140**. Real PnL ≈ **−$10** (vs $150) / **−$15** (vs 150+50SOMI at today's price). Money is in the wallet, NOT tied to containers. Full detail in `context/progress.md`.
+**🟢 WEEK 2 LIVE — RAW VOLUME ONLY (dev rule change).** Week-1 snapshot taken; week 2 ignores PnL/multiplier — only actual raw volume counts. No more fund/gas support → FIXED budget. Contest ends **~2026-07-07 21:00 IST**. We are **trader-2, #1, raw ~200k**. Wallet flat **~125 USDso + 51 SOMI ≈ $130** (TEAM capital, not personal → toll is not a loss; only thing that matters is keeping enough to keep trading).
 
-### Why we stopped (key decisions)
-- **Can't win:** ranking is by effective volume = raw × (1+PnL%), and RAW VOLUME DOMINATES. We're #4/6 (effVol 884 vs leaders 12k–53k); top-2 unreachable. Leaders did 16–130× our volume.
-- **Can't profit:** sustained bear (SOMI −40%/30d, BTC −22%, ETH −26%). No chop to capture, can't short on spot → any trading loses (toll + grind). The ~$13 we lost = gas + buy-high/sell-low across restart/experiment churn.
-- **Dev clarified:** final PnL = convert ALL funds to USDso at contest END. So holding inventory is neutral until the end; only end-liquidation value counts (NOT the live free-USDso snapshot).
-- → Goal = keep the money. Hold stablecoin, stop trading.
+### Active task
+`cheap.sh 400000 40` running on server (cost-aware middle-phase volume). Plan: cost-aware churn next 2–4 days → `burst.sh` full-throttle the final 2 days. ~$90 reserved for the final burst.
 
-### To RESTART (only if market turns / user says go)
-- Server `irony@100.80.130.21`, dir `~/dreamdex-r3`, branch `feature/profit-maker-agent`. SSH: `ssh -o ControlPath=none -o ConnectTimeout=30 -o BatchMode=yes irony@100.80.130.21 '<cmd>'`.
-- Start: `cd ~/dreamdex-r3/backend && docker compose up -d agent` then set enabled=1 in DB (`agent_state`). Monitor stays OFF (avoids Telegram spam + it's separate from agent). Image already built with all fixes.
-- **CHECK `agent_state.enabled` BEFORE any restart** — if 0, a restart FLATTENS inventory (sells to USDso). Wallet `0xD84fE2a2220f0269e3d88dab908ADceb2d691E76`, key in server `.env`.
+### Engines (all committed + on server, baked into image)
+- **`backend/volume_climb.py`** — taker WETH round-trip churn, ~100% fill, $50 legs, auto-flatten-on-stop, RPC-blip resilient. Cost-aware mode: `CLIMB_SPREAD_GATE_PCT` skips wide-spread trips; `CLIMB_COST_CEIL_PER_1K` pauses when rolling $/1k > ceil (window NOT cleared; resume only when cost back under ceil). Telegram pings (start/milestone every `CLIMB_TG_MILESTONE`/pause/resume/stop) via `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` (in server .env).
+- **`backend/cheap.sh [target] [bleed_cap]`** — cost-aware launcher (spread-gate 0.05%, cost-ceil $0.15/1k).
+- **`backend/burst.sh [target]`** — full-throttle (cost knobs off). Final-2-day weapon.
 
-### Live config now (server .env + config.py)
-- Pairs **WBTC + WETH only** (SOMI EXCLUDED — gradual grind kept bleeding). alloc 0.5/0.5. `MAKER_MAX_INV_USD=20`, `STRATEGIST_ENABLED=false` (no Gemini tokens), `TREND_LOOKBACK_S=86400`, `TREND_GUARD_PCT=0.015`, stop-loss 10% limit-protected, keepalive `KEEPALIVE_LEG_USD=1`.
+### Deploy / control (server irony@100.80.130.21, ~/dreamdex-r3/backend)
+- SSH: `ssh -o ControlPath=none -o ConnectTimeout=30 -o BatchMode=yes irony@100.80.130.21 '<cmd>'`
+- Code lives in the IMAGE → after editing volume_climb.py: scp to host THEN `docker compose build agent` (else `/app/volume_climb.py` is stale).
+- Launchers run detached (survive SSH drop). `--rm` wipes logs on exit → confirm result on-chain + leaderboard, not the log.
+- Monitor running run: `docker logs --tail N backend-agent-run-<id>`. Stop: `docker stop <id>` (may leave a bag if mid-trip → re-run flatten, but stop() auto-flattens on clean stop).
 
-### Fixes shipped this session (all committed)
-- Monitor reports REAL net worth from on-chain (not desynced tracker) + sane-band price clamp + on-chain EMA price fallback (killed false −$7/−$36/−$10 cards).
-- Agent: trend guard (pause buy when down >1.5%/24h, fails open w/ no history) + keepalive; auto-stop reads on-chain value; **`Inventory.sync_base()` — agent holdings now CHAIN-authoritative each tick (ERC20 pairs), killing the fill-tracker desync** (verified: corrected phantom 0.00022 WBTC → 0).
-
-### GOTCHAS
-- Leaderboard `pnl`/`usdsoBalance` = free USDso only → undercounts inventory. Trust on-chain net worth (wallet + vault `getWithdrawableBalance`; vault CONFIRMED EMPTY this session).
-- Fill-tracker desyncs; now mitigated by `sync_base` for ERC20. Native SOMI still tracker-based (gas+inventory commingled on-chain, can't separate).
-- Trend guard catches CLIFFS not SLOPES (>1.5%/24h); gradual grind slips under → trading still bleeds. Only zero-bleed = cash.
-- Native SOMI pool place+cancel need gas ≥5M; ERC20-payout fine at 3M.
-- One-off container test (agent stopped): `docker compose run --rm --no-deps -T agent python3 -` < localscript.py (pipe via stdin — avoids inline-quoting hell; inline f-strings can't contain backslashes).
-- Local: bash cwd resets to repo root between calls → absolute paths or `cd` inside the command.
+### Gotchas
+- Realized round-trip cost = spread + DRIFT-between-legs; drift is unpredictable → cost-ceil is reactive (throttles sustained-expensive, can't pre-empt one drift-expensive trip). Spread-gate is the only pre-trade preventer.
+- WETH spread ~0.02% = ~$0.10/1k toll FLOOR (can't beat it on taker); market currently choppy, sometimes NEGATIVE cost (profitable).
+- Effective-volume MILESTONE ($25/500k) needs PnL>0 (maker, two-way market) — unreachable by churn (peaks ~400-423k eff). Week 2 makes this moot (raw only).
+- Leaderboard `-new` URL is live R3; `-super-cool` is frozen R2. Gas via USDso→SOMI (no team support wk2).
+- DQ rule (>24h idle) appears NOT strictly enforced (we idled ~2d, stayed listed) — don't rely on it; keep trading.
+- Rivals: trader-3 192k raw but capital-poor (coiled spring if market pumps); trader-1 #2 active; trader-4 dead (76 tx); trader-5 inefficient ($2.8/tx). We're most efficient ($11/tx, 69% fill).
