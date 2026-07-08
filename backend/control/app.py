@@ -43,6 +43,7 @@ LOGIN_PASS  = os.environ.get("CONTROL_PASSWORD", "")
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR  = BACKEND_DIR / "static"
 INDEX_HTML  = STATIC_DIR / "index.html"
+R1_HTML     = STATIC_DIR / "r1.html"   # the original R1 dashboard, served for design reference
 
 # Fail closed on a real deployment with no key set.
 if not MOCK and not API_KEY:
@@ -199,6 +200,16 @@ def index():
     if INDEX_HTML.is_file():
         return FileResponse(str(INDEX_HTML))
     raise HTTPException(status_code=404, detail="index.html not found")
+
+
+@app.get("/r1")
+def r1_reference():
+    """The original R1 dashboard, served as a static design reference. Its data
+    calls target R1 endpoints this API doesn't expose, so panels render empty —
+    it's here to compare layout, not to drive anything."""
+    if R1_HTML.is_file():
+        return FileResponse(str(R1_HTML))
+    raise HTTPException(status_code=404, detail="r1.html not found")
 
 
 @app.post("/login")

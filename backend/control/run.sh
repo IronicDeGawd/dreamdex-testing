@@ -23,8 +23,15 @@ if [ ! -d "$VENV" ]; then
   echo "[control] creating venv…"
   python3 -m venv "$VENV"
 fi
-echo "[control] installing deps…"
-"$VENV/bin/pip" -q install -r requirements.txt -r control/requirements.txt
+# Install deps only when missing. Reinstalling every launch needs PyPI, which
+# turns a flaky network into a failed start (set -e aborts before uvicorn runs).
+# Force a reinstall with: CONTROL_REINSTALL=1 ./control/run.sh
+if [ ! -x "$VENV/bin/uvicorn" ] || [ "${CONTROL_REINSTALL:-0}" = "1" ]; then
+  echo "[control] installing deps…"
+  "$VENV/bin/pip" -q install -r requirements.txt -r control/requirements.txt
+else
+  echo "[control] deps present — skipping install"
+fi
 
 echo "[control] serving on 0.0.0.0:$PORT  (mock=${CONTROL_MOCK:-0})"
 exec "$VENV/bin/python3" -m uvicorn control.app:app --host 0.0.0.0 --port "$PORT"
