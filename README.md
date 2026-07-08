@@ -76,6 +76,23 @@ nohup ./direct_burst.sh 100000 25 0.004 0.15 > /tmp/run.log 2>&1 &
 Editing an engine requires rebuilding the image (`docker compose build agent`) —
 the code is baked in. Launchers run detached and survive an SSH drop.
 
+### Control dashboard (optional)
+A small web panel to launch/stop/tune runs without typing the launchers by hand —
+pick steady/fast mode, set leg/target/slip/etc., watch live volume/rank/logs, top
+up gas, or flatten. It runs on the **host** (not in Docker) because it shells out
+to the same `docker compose run` the launchers use.
+```bash
+cd backend
+# set CONTROL_API_KEY in .env first (required on mainnet)
+nohup ./control/run.sh 8787 > /tmp/control.log 2>&1 &   # → http://<server-ip>:8787
+# local UI dev with stub data (no keys, no Docker):
+CONTROL_MOCK=1 ./control/run.sh 8787
+```
+Every call needs the `X-API-Key` header (entered once in the UI, kept in
+localStorage). One engine at a time (nonce safety); a leg bigger than 0.8× free
+USDso is rejected before it can pre-revert. See
+[`context/plan/dashboard.md`](context/plan/dashboard.md) for the design.
+
 ### Maker + Telegram monitor (Docker)
 ```bash
 cd backend
