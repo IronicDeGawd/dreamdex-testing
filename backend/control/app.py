@@ -26,13 +26,30 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import hmac
+import time as _time
 
-from fastapi import FastAPI, Header, HTTPException, Depends
+from fastapi import FastAPI, Header, HTTPException, Depends, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from control.engine_manager import EngineManager, EngineError, MOCK
+
+# R4 rule 5: eligible pairs ONLY. USDC.e:USDso is a STABLECOIN pair and must never
+# be traded (removal risk). Enforced at /launch and /trade so it can't be entered.
+ELIGIBLE_PAIRS = {"WBTC:USDso", "WETH:USDso", "SOMI:USDso"}
+
+# Simple per-IP brute-force limiter for /login (no external dep).
+_login_fails: dict = {}
+_LOGIN_MAX_FAILS = 8
+_LOGIN_WINDOW_S = 300
+def _login_rate_ok(ip: str) -> bool:
+    now = _time.time()
+    fails = [t for t in _login_fails.get(ip, []) if now - t < _LOGIN_WINDOW_S]
+    _login_fails[ip] = fails
+    return len(fails) < _LOGIN_MAX_FAILS
+def _login_record_fail(ip: str) -> None:
+    _login_fails.setdefault(ip, []).append(_time.time())
 
 API_KEY     = os.environ.get("CONTROL_API_KEY", "")
 # Login gate in front of the panel (it's reachable over the public tunnel). The
@@ -133,28 +150,39 @@ class LiveBackend:
                 "spent_usdso": somi_usdso, "result": res}
 
     def flatten(self):
-        # Sell any base bag on EVERY ERC20 pair (the engine rotates across pairs,
-        # so a bag could be WBTC or WETH — not just WETH). Native pairs skipped.
-        import math
-        sold = {}
+        # Sell any base bag on EVERY ERC20 pair, then RE-CHECK the balance and
+        # RETRY with widening slip. Reports "flat" only if every pair is confirmed
+        # cleared on-chain; "bag" with residuals otherwise. Qty is FLOORED to lot
+        # so we never request more base than held (which would revert).
+        import math, time as _t
+        residual = {}
         for pair, m in self.cfg.MARKETS.items():
             if m.get("native") or int(str(m["base"]), 16) == 0:
                 continue
             dec = int(m["baseDecimals"])
             lot = float(m.get("lotSize", 0.0001)); minq = float(m.get("minQuantity", lot))
             tick = float(m.get("tickSize", 0.01))
-            bal = self.dex.wallet.erc20_balance(m["base"], dec)
-            if bal < minq:
+            b = self.dex.wallet.erc20_balance(m["base"], dec)
+            if b < minq:
                 continue
-            ob = self.dex.get_orderbook(pair); bid = ob.get("bid")
-            if not bid:
-                sold[pair] = "no-bid"; continue
-            qty = round(math.floor(bal / lot) * lot, 10)
-            px = round(round(bid * (1 - 0.004) / tick) * tick, 10)
-            r = self.dex.place_order(pair, "sell", qty, order_type="ioc",
-                                     limit_price=px, funding="wallet")
-            sold[pair] = f"{r.get('status')} ({bal:.8f})"
-        return {"status": "flat" if not sold else "flattened", "sold": sold}
+            for att in range(6):
+                ob = self.dex.get_orderbook(pair); bid = ob.get("bid")
+                if not bid:
+                    _t.sleep(2); continue
+                qty = round(math.floor(b / lot) * lot, 10)
+                px = round(math.floor(bid * (1 - 0.004 * (att + 1)) / tick) * tick, 10)
+                try:
+                    self.dex.place_order(pair, "sell", qty, order_type="ioc",
+                                         limit_price=px, funding="wallet")
+                except Exception:
+                    pass
+                _t.sleep(2)
+                b = self.dex.wallet.erc20_balance(m["base"], dec)
+                if b < minq:
+                    break
+            if b >= minq:
+                residual[pair] = round(b, 8)
+        return {"status": "flat" if not residual else "bag", "residual": residual}
 
     def trade(self, pair, side, amount_usdso, skip_sim):
         # ManualTrader needs a prices dict; pull a fresh book mid for the pair.
@@ -228,16 +256,20 @@ def r1_reference():
 
 
 @app.post("/login")
-def login(body: LoginBody):
-    """Validate username/password, hand back the API key on success.
-    Constant-time compares. Fails closed if no password is configured
+def login(body: LoginBody, request: Request):
+    """Validate username/password, hand back the API key on success. Constant-time
+    compares, per-IP brute-force limiter. Fails closed with no password configured
     (except mock mode, where a keyless dev login is allowed)."""
+    ip = request.client.host if request.client else "unknown"
+    if not _login_rate_ok(ip):
+        raise HTTPException(status_code=429, detail="too many attempts — wait a few minutes")
     ok_user = hmac.compare_digest(body.username, LOGIN_USER)
     ok_pass = bool(LOGIN_PASS) and hmac.compare_digest(body.password, LOGIN_PASS)
     if MOCK and not LOGIN_PASS:
         ok_user = hmac.compare_digest(body.username, LOGIN_USER)
         ok_pass = True  # keyless local dev
     if not (ok_user and ok_pass):
+        _login_record_fail(ip)
         raise HTTPException(status_code=401, detail="invalid username or password")
     return {"api_key": API_KEY}
 
@@ -277,6 +309,14 @@ def launch(body: LaunchBody, _=Depends(require_key)):
         if v is not None:
             params[k] = v
 
+    # Rule 5: only eligible (non-stablecoin) pairs. Reject anything else — this is
+    # the wall that keeps USDC.e:USDso out of a run.
+    if body.pair:
+        bad = [p.strip() for p in body.pair.split(",") if p.strip() not in ELIGIBLE_PAIRS]
+        if bad:
+            raise HTTPException(status_code=400,
+                                detail=f"ineligible pair(s) {bad} — allowed: {sorted(ELIGIBLE_PAIRS)}")
+
     # Leg-vs-balance guard: a leg bigger than ~0.8× free USDso pre-reverts on
     # the very first buy. Reject with a clear message instead of burning gas.
     try:
@@ -314,6 +354,9 @@ def stop(_=Depends(require_key)):
 
 @app.post("/gas/topup")
 def gas_topup(body: GasBody, _=Depends(require_key)):
+    if engine.is_running():
+        raise HTTPException(status_code=409,
+                            detail="engine running — stop it first (nonce safety)")
     engine.audit("gas_topup", {"somi_usdso": body.somi_usdso})
     try:
         return backend.gas_topup(body.somi_usdso)
@@ -323,6 +366,9 @@ def gas_topup(body: GasBody, _=Depends(require_key)):
 
 @app.post("/flatten")
 def flatten(_=Depends(require_key)):
+    if engine.is_running():
+        raise HTTPException(status_code=409,
+                            detail="engine running — stop it first (nonce safety)")
     engine.audit("flatten", {})
     try:
         return backend.flatten()
@@ -335,6 +381,9 @@ def trade(body: TradeBody, _=Depends(require_key)):
     if engine.is_running():
         raise HTTPException(status_code=409,
                             detail="an engine is running — stop it before manual trades (nonce safety)")
+    if body.pair not in ELIGIBLE_PAIRS:
+        raise HTTPException(status_code=400,
+                            detail=f"ineligible pair {body.pair} — allowed: {sorted(ELIGIBLE_PAIRS)}")
     engine.audit("trade", body.model_dump())
     try:
         return backend.trade(body.pair, body.side, body.amount_usdso, body.skip_sim)
