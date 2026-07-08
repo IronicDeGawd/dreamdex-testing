@@ -207,8 +207,19 @@ class EngineManager:
                 except (OSError, ValueError):
                     pass
         else:
-            subprocess.run(["docker", "stop", "-t", "15", CONTAINER],
-                           capture_output=True, text=True, timeout=40)
+            # docker stop sends SIGTERM (the engine's handler flattens, then exits),
+            # then SIGKILL after the grace period. VERIFY it actually died — a
+            # discarded failure would mark us "stopped" while the engine keeps
+            # trading and the post-stop flatten fights it for the nonce.
+            r = subprocess.run(["docker", "stop", "-t", "20", CONTAINER],
+                               capture_output=True, text=True, timeout=45)
+            if self._container_alive():
+                subprocess.run(["docker", "kill", CONTAINER],
+                               capture_output=True, text=True, timeout=20)
+            if self._container_alive():
+                raise EngineError(
+                    f"docker stop did not kill {CONTAINER} — still alive "
+                    f"({(r.stderr or '').strip()[:120]}); NOT flattening (nonce risk)")
 
         st["running"] = False
         st["ended_at"] = time.time()
