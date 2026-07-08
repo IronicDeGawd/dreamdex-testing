@@ -61,13 +61,13 @@ def sb(): return w.native_balance()
 def snap_lot(q):
     n = max(round(q/LOT), 1); q = round(n*LOT, 10)
     return q if q >= MINQ else round(MINQ, 10)
-def poll_base(target_cmp, want_above, timeout=8.0):
+def poll_base(target_cmp, want_above, timeout=3.0):
     t0 = time.time()
     while time.time()-t0 < timeout:
         v = bb()
         if (want_above and v >= target_cmp) or (not want_above and v <= target_cmp):
             return v
-        time.sleep(1.0)
+        time.sleep(0.2)
     return bb()
 
 ERC20 = [
