@@ -99,8 +99,10 @@ class EngineManager:
 
     # ── launch ────────────────────────────────────────────────────────────
     def _steady_env(self, p: dict) -> dict:
-        # Mirrors cheap.sh.
+        # Mirrors cheap.sh. Pair + spread gate are tunable (liquidity shifted
+        # after the public launch — WBTC:USDso is now the tightest book).
         return {
+            "CLIMB_PAIRS":           str(p.get("pair", "WETH:USDso")),  # comma list = auto-rotate to cheapest
             "CLIMB_TARGET_VOLUME":   str(p["target"]),
             "CLIMB_LEG_USD":         str(p["leg"]),
             "CLIMB_SLIP_PCT":        str(p.get("slip", 0.003)),
@@ -110,7 +112,7 @@ class EngineManager:
             "CLIMB_MAX_ITERS":       "40000",
             "CLIMB_PAUSE_S":         "0",
             "CLIMB_PREAPPROVE":      "1",
-            "CLIMB_SPREAD_GATE_PCT": "0.05",
+            "CLIMB_SPREAD_GATE_PCT": str(p.get("spread_gate", 0.05)),
             "CLIMB_COST_CEIL_PER_1K": str(p.get("cost_ceil", 0.15)),
             "CLIMB_PAUSE_EXP_S":     "45",
             "CLIMB_COST_WINDOW":     "15",
@@ -119,6 +121,7 @@ class EngineManager:
     def _fast_env(self, p: dict) -> dict:
         # Mirrors direct_burst.sh.
         return {
+            "DP_PAIR":             str(p.get("pair", "WETH:USDso")),
             "DP_TARGET":           str(p["target"]),
             "DP_LEG_USD":          str(p["leg"]),
             "DP_SLIP":             str(p.get("slip", 0.004)),

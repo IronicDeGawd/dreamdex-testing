@@ -172,10 +172,11 @@ class LaunchBody(BaseModel):
     mode: str                       # "steady" | "fast"
     target: float
     leg: float
+    pair: str | None = None         # e.g. WBTC:USDso (default WETH:USDso)
     slip: float | None = None
     bleed_cap: float | None = None  # steady only
     cost_ceil: float | None = None  # steady only
-    spread_gate: float | None = None  # fast only
+    spread_gate: float | None = None  # steady + fast
 
 
 class LoginBody(BaseModel):
@@ -257,7 +258,7 @@ def audit(n: int = 50, _=Depends(require_key)):
 @app.post("/launch")
 def launch(body: LaunchBody, _=Depends(require_key)):
     params = {"target": body.target, "leg": body.leg}
-    for k in ("slip", "bleed_cap", "cost_ceil", "spread_gate"):
+    for k in ("pair", "slip", "bleed_cap", "cost_ceil", "spread_gate"):
         v = getattr(body, k)
         if v is not None:
             params[k] = v
