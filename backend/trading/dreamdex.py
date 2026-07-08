@@ -528,8 +528,10 @@ class DreamDEX:
                 return {"status": "reverted", "tx_hash": tx_hash}
 
             # R1: brief settlement delay — dreamDEX sometimes credits/debits
-            # asynchronously within a few seconds of mining.
-            _time.sleep(3)
+            # asynchronously within a few seconds of mining. Configurable so bursts
+            # can trim it (their loops re-poll balance to catch a late credit);
+            # default stays conservative for the maker, which reads fills once.
+            _time.sleep(float(os.environ.get("DREAMDEX_SETTLE_S", "1.5")))
             state_after = _read_state()
 
             # Estimate gas cost (in native units) so we don't mistake it for inventory loss.
