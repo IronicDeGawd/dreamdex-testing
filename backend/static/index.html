@@ -185,12 +185,11 @@
             <span id="header-rank" class="text-textMuted text-xs font-mono hidden sm:inline"></span>
         </div>
         <div class="flex items-center gap-3">
-            <input id="apiKey" type="password" class="input-base w-40" placeholder="X-API-Key">
-            <button class="btn-base text-xs" onclick="saveKey()">SAVE</button>
             <div class="flex items-center gap-2">
                 <div id="status-dot" class="w-2.5 h-2.5 rounded-full bg-textMuted"></div>
-                <span id="status-text" class="text-textMuted font-mono text-xs">NO KEY</span>
+                <span id="status-text" class="text-textMuted font-mono text-xs">LOCKED</span>
             </div>
+            <button id="btn-logout" class="btn-base text-xs hidden" onclick="logout()">LOG OUT</button>
         </div>
     </header>
 
@@ -344,6 +343,25 @@
         </div>
     </main>
 
+    <!-- Login overlay -->
+    <div id="login-overlay" class="modal-overlay fixed inset-0 z-[70] flex items-center justify-center p-4">
+        <div class="modal-card w-full max-w-sm">
+            <div class="panel-header">dreamDEX Engine Control — Sign in</div>
+            <div class="panel-body flex flex-col gap-3">
+                <div class="flex flex-col gap-1">
+                    <label class="text-xs text-textMuted uppercase">Username</label>
+                    <input id="login-user" class="input-base w-full" autocomplete="username" placeholder="username">
+                </div>
+                <div class="flex flex-col gap-1">
+                    <label class="text-xs text-textMuted uppercase">Password</label>
+                    <input id="login-pass" type="password" class="input-base w-full" autocomplete="current-password" placeholder="password" onkeydown="if(event.key==='Enter')doLogin()">
+                </div>
+                <p id="login-err" class="text-xs text-danger hidden">Invalid username or password.</p>
+                <button class="btn-base btn-primary font-bold py-2 mt-1" onclick="doLogin()">SIGN IN</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Confirm modal -->
     <div id="modal-overlay" class="modal-overlay fixed inset-0 z-50 hidden items-center justify-center p-4" style="display:none">
         <div id="modal-card" class="modal-card w-full max-w-md">
@@ -370,7 +388,7 @@ function key(){ return localStorage.getItem("ddx_key") || ""; }
 async function api(path, opts={}){
   opts.headers = Object.assign({"X-API-Key": key(), "Content-Type":"application/json"}, opts.headers||{});
   const r = await fetch(path, opts);
-  if(r.status === 401){ setConn(false,"BAD KEY"); throw new Error("401 unauthorized — check API key"); }
+  if(r.status === 401){ setConn(false,"LOCKED"); showLogin(); throw new Error("session expired — sign in again"); }
   const data = await r.json().catch(()=>({}));
   if(!r.ok) throw new Error(data.detail || (r.status+" error"));
   return data;
@@ -379,7 +397,32 @@ function setConn(ok, txt){
   $("status-dot").style.background = ok ? "var(--c-success)" : "var(--c-danger)";
   $("status-text").textContent = txt;
 }
-function saveKey(){ localStorage.setItem("ddx_key", $("apiKey").value.trim()); toast("Key saved"); refreshAll(); }
+
+// ── login gate ────────────────────────────────────────────────────────
+function showLogin(){
+  localStorage.removeItem("ddx_key");
+  $("login-overlay").style.display="flex";
+  $("btn-logout").classList.add("hidden");
+  setConn(false,"LOCKED");
+}
+function hideLogin(){
+  $("login-overlay").style.display="none";
+  $("btn-logout").classList.remove("hidden");
+}
+async function doLogin(){
+  const username=$("login-user").value.trim(), password=$("login-pass").value;
+  $("login-err").classList.add("hidden");
+  try{
+    const r=await fetch("/login",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({username,password})});
+    if(!r.ok) throw new Error("bad creds");
+    const d=await r.json();
+    localStorage.setItem("ddx_key", d.api_key||"");
+    $("login-pass").value="";
+    hideLogin(); toast("Signed in"); refreshAll();
+  }catch(e){ $("login-err").classList.remove("hidden"); }
+}
+function logout(){ showLogin(); toast("Logged out"); }
 
 // ── toast ─────────────────────────────────────────────────────────────
 let toastT;
@@ -506,9 +549,8 @@ async function refreshLogs(){
 function refreshAll(){ refreshStatus(); refreshBalances(); refreshLeaderboard(); refreshLogs(); }
 
 // ── boot ──────────────────────────────────────────────────────────────
-$("apiKey").value = key();
 setMode("steady"); setSide("buy");
-if(key()) refreshAll(); else setConn(false,"NO KEY");
+if(key()){ hideLogin(); refreshAll(); } else { showLogin(); }
 setInterval(refreshStatus,5000);
 setInterval(refreshLogs,5000);
 setInterval(refreshBalances,15000);

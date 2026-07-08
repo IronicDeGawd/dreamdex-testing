@@ -25,6 +25,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
+import hmac
+
 from fastapi import FastAPI, Header, HTTPException, Depends
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,6 +35,11 @@ from pydantic import BaseModel
 from control.engine_manager import EngineManager, EngineError, MOCK
 
 API_KEY     = os.environ.get("CONTROL_API_KEY", "")
+# Login gate in front of the panel (it's reachable over the public tunnel). The
+# username is not a secret; the password lives in .env (gitignored). On a correct
+# login the browser is handed the real API key, which still gates every endpoint.
+LOGIN_USER  = os.environ.get("CONTROL_USERNAME", "admin-aditya")
+LOGIN_PASS  = os.environ.get("CONTROL_PASSWORD", "")
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR  = BACKEND_DIR / "static"
 INDEX_HTML  = STATIC_DIR / "index.html"
@@ -170,6 +177,11 @@ class LaunchBody(BaseModel):
     spread_gate: float | None = None  # fast only
 
 
+class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
 class GasBody(BaseModel):
     somi_usdso: float               # USDso to spend on SOMI gas
 
@@ -187,6 +199,21 @@ def index():
     if INDEX_HTML.is_file():
         return FileResponse(str(INDEX_HTML))
     raise HTTPException(status_code=404, detail="index.html not found")
+
+
+@app.post("/login")
+def login(body: LoginBody):
+    """Validate username/password, hand back the API key on success.
+    Constant-time compares. Fails closed if no password is configured
+    (except mock mode, where a keyless dev login is allowed)."""
+    ok_user = hmac.compare_digest(body.username, LOGIN_USER)
+    ok_pass = bool(LOGIN_PASS) and hmac.compare_digest(body.password, LOGIN_PASS)
+    if MOCK and not LOGIN_PASS:
+        ok_user = hmac.compare_digest(body.username, LOGIN_USER)
+        ok_pass = True  # keyless local dev
+    if not (ok_user and ok_pass):
+        raise HTTPException(status_code=401, detail="invalid username or password")
+    return {"api_key": API_KEY}
 
 
 # ── Read endpoints ────────────────────────────────────────────────────────
