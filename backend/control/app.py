@@ -107,7 +107,12 @@ class LiveBackend:
                 "total_usdso": round(usdso + vault, 4)}
 
     def free_usdso(self):
-        return self._summary().get("usdso_wallet", 0.0)
+        # FRESH on-chain read — the leg guard must not use the 60s-cached poll
+        # (which can snapshot a mid-round-trip dip and wrongly reject a valid leg).
+        try:
+            return self.dex.wallet.erc20_balance(self.cfg.USDSO_ADDRESS, 18)
+        except Exception:
+            return self._summary().get("usdso_wallet", 0.0)
 
     def leaderboard(self):
         st = self.lb.get_my_stats()
@@ -128,19 +133,28 @@ class LiveBackend:
                 "spent_usdso": somi_usdso, "result": res}
 
     def flatten(self):
-        mkt = self.cfg.MARKETS["WETH:USDso"]
-        dec = int(mkt["baseDecimals"])
-        weth = self.dex.wallet.erc20_balance(mkt["base"], dec)
-        if weth <= 0:
-            return {"status": "flat", "weth": 0.0}
-        ob = self.dex.get_orderbook("WETH:USDso")
-        bid = ob.get("bid")
-        if not bid:
-            return {"status": "error", "error": "no WETH bid to sell into", "weth": weth}
-        px = round(bid * (1 - 0.004), 2)
-        res = self.dex.place_order("WETH:USDso", "sell", round(weth, 8),
-                                   order_type="ioc", limit_price=px, funding="wallet")
-        return {"status": res.get("status"), "sold_weth": round(weth, 6), "result": res}
+        # Sell any base bag on EVERY ERC20 pair (the engine rotates across pairs,
+        # so a bag could be WBTC or WETH — not just WETH). Native pairs skipped.
+        import math
+        sold = {}
+        for pair, m in self.cfg.MARKETS.items():
+            if m.get("native") or int(str(m["base"]), 16) == 0:
+                continue
+            dec = int(m["baseDecimals"])
+            lot = float(m.get("lotSize", 0.0001)); minq = float(m.get("minQuantity", lot))
+            tick = float(m.get("tickSize", 0.01))
+            bal = self.dex.wallet.erc20_balance(m["base"], dec)
+            if bal < minq:
+                continue
+            ob = self.dex.get_orderbook(pair); bid = ob.get("bid")
+            if not bid:
+                sold[pair] = "no-bid"; continue
+            qty = round(math.floor(bal / lot) * lot, 10)
+            px = round(round(bid * (1 - 0.004) / tick) * tick, 10)
+            r = self.dex.place_order(pair, "sell", qty, order_type="ioc",
+                                     limit_price=px, funding="wallet")
+            sold[pair] = f"{r.get('status')} ({bal:.8f})"
+        return {"status": "flat" if not sold else "flattened", "sold": sold}
 
     def trade(self, pair, side, amount_usdso, skip_sim):
         # ManualTrader needs a prices dict; pull a fresh book mid for the pair.
