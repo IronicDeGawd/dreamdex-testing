@@ -14,6 +14,16 @@
 │   │                                #   gate, bag-proof (sell_all_weth each loop)
 │   ├── cheap.sh                     # Launcher (steady): target, bleed_cap, leg, cost_ceil
 │   ├── direct_burst.sh              # Launcher (fast): target, leg, slip, spread_gate
+│   ├── control/                     # Engine-control API + dashboard (host-run FastAPI)
+│   │   ├── app.py                   # FastAPI: /status /balances /leaderboard /logs
+│   │   │                            #   /launch /stop /gas/topup /flatten /trade /audit;
+│   │   │                            #   X-API-Key auth; LiveBackend vs MockBackend
+│   │   ├── engine_manager.py        # Launch/stop/status/logs, single-engine lock,
+│   │   │                            #   log-tail volume parse, audit log, CONTROL_MOCK
+│   │   ├── mock_engine.py           # Fake engine (prints tot=$… lines) for local dev
+│   │   ├── run.sh                   # Host launcher: venv + uvicorn on 0.0.0.0:PORT
+│   │   ├── requirements.txt         # fastapi + uvicorn (on top of backend/requirements)
+│   │   └── state/                   # Runtime: engine.json, audit.log, logs/ (gitignored)
 │   ├── agent_v3/                    # Profit maker (Docker CMD = runner)
 │   │   ├── runner.py                # Entrypoint: threaded supervisor, multi-pair cycling
 │   │   ├── maker.py                 # Per-pair no-bleed PostOnly cycle + hold-mode trend gate
@@ -26,13 +36,13 @@
 │   ├── trading/                     # Shared utilities (used by the live engines)
 │   │   ├── wallet.py                # Web3 signing + FailoverHTTPProvider (multi-RPC rotation)
 │   │   ├── dreamdex.py              # REST wrapper, placeOrder calldata, fill tracking
-│   │   └── manual.py                # ORPHANED — old dashboard manual-trade handler (revival kit)
+│   │   └── manual.py                # Manual-trade handler — reused by control /trade
 │   ├── monitor/                     # Monitoring
 │   │   ├── db.py                    # SQLite persistence (used by agent_v3/runner)
-│   │   ├── leaderboard.py           # ORPHANED — dashboard data producer (revival kit)
-│   │   ├── portfolio.py             # ORPHANED — dashboard data producer (revival kit)
-│   │   └── prices.py                # ORPHANED — dashboard data producer (revival kit)
-│   ├── static/index.html           # Old web dashboard (to revive — context/plan/dashboard.md)
+│   │   ├── leaderboard.py           # Live rank/volume poller — reused by control /leaderboard
+│   │   ├── portfolio.py             # On-chain balance reader — reused by control /balances
+│   │   └── prices.py                # Price/book poller (dashboard + strategist)
+│   ├── static/index.html           # Engine-control dashboard (served by control/app.py)
 │   ├── archive/                     # R1/R2 reference scripts incl. old server.py (DO NOT RUN)
 │   ├── config.py                    # MARKETS, SOMNIA_RPCS failover pool, thresholds, CHAIN_ID
 │   ├── docker-compose.yml           # Launches agent_v3.runner + agent_v3.monitor_bot
@@ -62,12 +72,14 @@
 - **Steady engine:** `backend/volume_climb.py` via `cheap.sh` (detached).
 - **Fast engine:** `backend/direct_burst.py` via `direct_burst.sh` (detached).
 - **Maker + Telegram:** `backend/agent_v3/runner.py` + `monitor_bot.py` (docker compose).
+- **Control dashboard:** `backend/control/run.sh [port]` (host-run FastAPI; `CONTROL_MOCK=1`
+  for keyless local dev). Serves `static/index.html`; wraps the two launchers.
 
 ## Critical facts (R3)
 - **Somnia network, EVM, web3.py** — NOT Solana. Mainnet chain 5031, testnet 50312.
-- **No Flask server runs in R3.** The old dashboard server is in `archive/server.py`;
-  its data producers (`monitor/{prices,portfolio,leaderboard}.py`, `trading/manual.py`)
-  are currently orphaned — kept as the dashboard revival kit (`context/plan/dashboard.md`).
+- **Control API is host-run, not containerized** (`archive/server.py` is the retired R1
+  Flask). It reuses `monitor/{prices,portfolio,leaderboard}.py` + `trading/manual.py` and
+  shells out to `cheap.sh`/`direct_burst.sh` — see `context/plan/dashboard.md`.
 - **Order placement:** REST `/orders` (volume_climb) OR direct `placeOrder`
   (0x4e978373, direct_burst). Native-SOMI pool ops need gas ≥5M; ERC20 fine at 3M.
 - **Secrets** in `backend/.env` only (gitignored). Repo is PUBLIC.
