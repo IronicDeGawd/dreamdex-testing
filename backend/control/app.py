@@ -166,7 +166,42 @@ class LiveBackend:
                 "signal": st.get("signal"), "live": st.get("live")}
 
     def cohort(self):
-        return self.lb.get_cohort()
+        rows = self.lb.get_cohort()
+        # For OUR row we don't need the flat-balance heuristic — read the chain.
+        # True capital = free USDso + inventory valued at mid, so a mid-round-trip
+        # snapshot can't fake a loss. Rivals still use the rolling-max estimate.
+        try:
+            from monitor.leaderboard import RUNWAY_RESERVE
+            usdso = self.dex.wallet.erc20_balance(self.cfg.USDSO_ADDRESS, 18)
+            inv = 0.0
+            for pair, m in self.cfg.MARKETS.items():
+                if pair not in ELIGIBLE_PAIRS or m.get("native") or int(str(m["base"]), 16) == 0:
+                    continue
+                b = self.dex.wallet.erc20_balance(m["base"], int(m["baseDecimals"]))
+                if b <= 0:
+                    continue
+                ob = self.dex.get_orderbook(pair)
+                mid = ((ob.get("bid") or 0) + (ob.get("ask") or 0)) / 2
+                inv += b * mid
+            cap = usdso + inv
+            for r in rows:
+                if not r.get("is_me"):
+                    continue
+                v = r["volume"]
+                burned = max(150.0 - cap, 0.0)
+                cpk = round(burned / v * 1000, 3) if v >= 100 else None
+                spendable = max(cap - RUNWAY_RESERVE, 0.0)
+                r.update({
+                    "balance": round(cap, 2),
+                    "pnl": round(cap - 150.0, 2),
+                    "mid_trade": inv > 1.0,
+                    "cost_per_1k": cpk,
+                    "runway_volume": round(spendable / cpk * 1000) if (cpk and cpk > 0) else None,
+                    "onchain": True,
+                })
+        except Exception:
+            pass   # fall back to the board-derived row
+        return rows
 
     def gas_topup(self, somi_usdso):
         ob = self.dex.get_orderbook("SOMI:USDso")
