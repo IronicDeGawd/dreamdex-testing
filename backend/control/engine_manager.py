@@ -120,7 +120,8 @@ class EngineManager:
             "CLIMB_SPREAD_GATE_PCT": str(p.get("spread_gate", 0.05)),
             "CLIMB_COST_CEIL_PER_1K": str(p.get("cost_ceil", 0.15)),
             "CLIMB_PAUSE_EXP_S":     "45",
-            "CLIMB_COST_WINDOW":     "15",
+            # Wide window: realized cost is a safety breaker now, not the throttle.
+            "CLIMB_COST_WINDOW":     "50",
         }
 
     def _fast_env(self, p: dict) -> dict:

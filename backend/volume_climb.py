@@ -159,10 +159,19 @@ if PREAPPROVE:
 vol = 0.0; trips = 0; consec_fail = 0; _net_fails = 0
 _last_trade_ts = time.time()   # keepalive clock — reset on every successful trip
 from collections import deque
+# COST_CEIL_PER_1K is now a PRE-TRADE ceiling on the toll the live book implies
+# (effective spread x 5), not on the realized rolling mean. Measured over 54 trips:
+# implied toll had stdev 0.045 while realized had 0.234 — 5.2x the noise — because
+# realized also carries the price drift during the ~30-60s we hold inventory. Gating
+# on realized meant pausing at random rather than when trading was actually dear.
 COST_CEIL_PER_1K = float(os.environ.get("CLIMB_COST_CEIL_PER_1K", "0"))
 SPREAD_GATE_PCT  = float(os.environ.get("CLIMB_SPREAD_GATE_PCT", "0"))
 PAUSE_EXP_S      = float(os.environ.get("CLIMB_PAUSE_EXP_S", "30"))
-COST_WINDOW      = int(os.environ.get("CLIMB_COST_WINDOW", "15"))
+# Realized cost is demoted to a slow SAFETY BREAKER: a wide window, and it only
+# fires when realized runs far past what the book implied — i.e. something is
+# structurally wrong (bad fills, hidden slippage), not just noise.
+COST_WINDOW      = int(os.environ.get("CLIMB_COST_WINDOW", "50"))
+BREAKER_MULT     = float(os.environ.get("CLIMB_REALIZED_BREAKER_MULT", "2.0"))
 _costs = deque(maxlen=COST_WINDOW)
 try:
     _sob = dex.get_orderbook("SOMI:USDso")
@@ -311,7 +320,14 @@ def pick_cheapest(leg_usd):
     if best is None:
         return None, None, None, None, False
     sp, ob, eff, quoted = best
-    within = not (SPREAD_GATE_PCT > 0 and eff > SPREAD_GATE_PCT)
+    # A round-trip crosses the effective spread once on a notional of `leg`, and
+    # books 2x leg of volume — so the toll per 1k of volume is eff% x 5.
+    implied_toll = eff * 5.0
+    within = True
+    if SPREAD_GATE_PCT > 0 and eff > SPREAD_GATE_PCT:
+        within = False
+    if COST_CEIL_PER_1K > 0 and implied_toll > COST_CEIL_PER_1K:
+        within = False
     return sp, ob, eff, quoted, within
 
 for i in range(MAX_ITERS):
@@ -340,8 +356,13 @@ for i in range(MAX_ITERS):
         idle_s = time.time() - _last_trade_ts
         force_keepalive = (not within) and idle_s > LIVENESS_S
         if not within and not force_keepalive:
-            if not _paused: tg(f"⏸ Paused @ ${vol:,.0f} vol — cheapest effective spread {spread_pct:.3f}% > gate {SPREAD_GATE_PCT}%"); _paused = True
-            print(f"[{i}] cheapest eff {spread_pct:.3f}% (quoted {quoted_pct:.3f}%) > gate {SPREAD_GATE_PCT}% — pause {PAUSE_EXP_S:.0f}s (idle {idle_s/3600:.1f}h)")
+            toll = spread_pct * 5.0
+            why = (f"toll ${toll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k"
+                   if (COST_CEIL_PER_1K > 0 and toll > COST_CEIL_PER_1K)
+                   else f"eff {spread_pct:.3f}% > gate {SPREAD_GATE_PCT}%")
+            if not _paused: tg(f"⏸ Paused @ ${vol:,.0f} vol — book too dear: {why}"); _paused = True
+            print(f"[{i}] book too dear on {sp['pair']}: eff {spread_pct:.3f}% -> toll ${toll:.3f}/1k ({why}) "
+                  f"— pause {PAUSE_EXP_S:.0f}s (idle {idle_s/3600:.1f}h)")
             time.sleep(PAUSE_EXP_S); continue
 
         leg_this = LEG_USD
@@ -401,16 +422,22 @@ for i in range(MAX_ITERS):
         cost_1k = ((u_now-u) + (s_now-s)*SOMI_PX)/vt*1000 if vt > 0 else 0.0
         _costs.append(cost_1k); roll = sum(_costs)/len(_costs)
         impact = spread_pct - quoted_pct
-        print(f"[{i}] trip {trips} {tag} @eff {spread_pct:.3f}% (quoted {quoted_pct:.3f}%, impact +{impact:.3f}%): "
+        implied = spread_pct * 5.0
+        print(f"[{i}] trip {trips} {tag} @eff {spread_pct:.3f}% (quoted {quoted_pct:.3f}%, impact {impact:+.3f}%): "
               f"vol+=${vt:.2f} tot=${vol:.2f} USDso={u:.4f}(bleed ${u_start-u:.4f}) SOMI={s:.4f} "
-              f"| cost ${cost_1k:.3f}/1k roll ${roll:.3f}/1k")
-        if _paused and (COST_CEIL_PER_1K <= 0 or roll <= COST_CEIL_PER_1K):
-            tg(f"▶️ Resumed @ ${vol:,.0f} vol — cost ${roll:.3f}/1k (under ceil)"); _paused = False
+              f"| implied ${implied:.3f}/1k cost ${cost_1k:.3f}/1k roll ${roll:.3f}/1k")
+        if _paused:
+            tg(f"▶️ Resumed @ ${vol:,.0f} vol — book cheap again"); _paused = False
         if vol >= _last_ms + TG_MS:
             _last_ms = vol; tg(f"📊 +${vol:,.0f} vol | roll ${roll:.3f}/1k | USDso ${u:.0f} | gas {s_start-s:.1f} SOMI")
-        if COST_CEIL_PER_1K > 0 and len(_costs) >= max(3, COST_WINDOW//2) and roll > COST_CEIL_PER_1K:
-            if not _paused: tg(f"⏸ Paused @ ${vol:,.0f} vol — cost ${roll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k"); _paused = True
-            print(f"[{i}] rolling cost ${roll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k — PAUSE {PAUSE_EXP_S:.0f}s"); time.sleep(PAUSE_EXP_S)
+        # SAFETY BREAKER (not the throttle): only when realized cost runs far past
+        # the book over a FULL wide window does something structural look wrong.
+        breaker = COST_CEIL_PER_1K * BREAKER_MULT
+        if COST_CEIL_PER_1K > 0 and len(_costs) >= COST_WINDOW and roll > breaker:
+            tg(f"🚨 Realized ${roll:.3f}/1k > {BREAKER_MULT:g}x ceil (${breaker:.3f}) over {COST_WINDOW} trips — pausing to reassess")
+            print(f"[{i}] BREAKER: realized ${roll:.3f}/1k > {BREAKER_MULT:g}x ceil ${breaker:.3f}/1k over "
+                  f"{COST_WINDOW} trips — book implied far less; pausing {PAUSE_EXP_S*4:.0f}s")
+            _costs.clear(); time.sleep(PAUSE_EXP_S * 4)
         time.sleep(PAUSE_S)
     except SystemExit:
         raise
