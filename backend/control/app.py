@@ -82,8 +82,9 @@ class MockBackend:
         return 200.0
 
     def leaderboard(self):
-        return {"my_rank": 2, "total": 6, "my_volume": 1086202.0,
-                "my_pnl": 0.0, "gap": 7200, "signal": "MAINTAIN", "live": True}
+        return {"my_rank": 3, "total": 9, "my_volume": 91843.9, "my_pnl": -13.83,
+                "my_tx": 1176, "gap": 51823.64, "gap_to": "#2",
+                "signal": "ACCELERATE", "live": True}
 
     def gas_topup(self, somi_usdso):
         return {"status": "success", "mock": True, "spent_usdso": somi_usdso}
@@ -147,7 +148,9 @@ class LiveBackend:
         st = self.lb.get_my_stats()
         return {"my_rank": st.get("my_rank"), "total": st.get("total"),
                 "my_volume": st.get("my_volume", 0.0), "my_pnl": st.get("my_pnl", 0.0),
-                "gap": st.get("gap"), "signal": st.get("signal"), "live": st.get("live")}
+                "my_tx": st.get("my_tx", 0),
+                "gap": st.get("gap"), "gap_to": st.get("gap_to"),
+                "signal": st.get("signal"), "live": st.get("live")}
 
     def gas_topup(self, somi_usdso):
         ob = self.dex.get_orderbook("SOMI:USDso")

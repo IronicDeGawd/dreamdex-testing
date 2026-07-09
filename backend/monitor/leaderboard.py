@@ -61,15 +61,24 @@ class LeaderboardMonitor:
                 print(f"[LeaderboardMonitor] unexpected shape: {type(data).__name__}")
                 return
 
-            # Normalize tx-count field name across possible API revisions
+            # Normalize field names across API revisions.
             def tx_of(e):
                 for k in ("tx_count", "txCount", "transactions", "txs", "count"):
-                    if k in e:
+                    if e.get(k) is not None:
                         try: return int(e[k])
                         except (TypeError, ValueError): pass
                 return 0
 
-            lb = sorted(lb, key=tx_of, reverse=True)
+            def vol_of(e):
+                for k in ("volumeUsdso", "volume", "volume_usdso"):
+                    if e.get(k) is not None:
+                        try: return float(e[k])
+                        except (TypeError, ValueError): pass
+                return 0.0
+
+            # R4 ranks by VOLUME (highest wins; top-2 qualify). Ranking by txCount
+            # was an R1 leftover and reported us several places too low.
+            lb = sorted(lb, key=vol_of, reverse=True)
             total = len(lb)
             my_rank = "?"
             my_tx = 0
@@ -91,16 +100,20 @@ class LeaderboardMonitor:
                     except (TypeError, ValueError): my_bal = 0.0
                     break
 
-            third_tx = tx_of(lb[2]) if total >= 3 else (tx_of(lb[-1]) if total else 0)
-            gap = my_tx - third_tx
+            # Gap in VOLUME. Ranked >1: how much volume to overtake the trader above.
+            # Ranked #1: our lead over #2. Positive = the number that matters.
+            if isinstance(my_rank, int) and my_rank > 1:
+                gap = round(vol_of(lb[my_rank - 2]) - my_vol, 2)
+                gap_to = f"#{my_rank - 1}"
+            elif isinstance(my_rank, int) and my_rank == 1:
+                gap = round(my_vol - (vol_of(lb[1]) if total > 1 else 0.0), 2)
+                gap_to = "lead over #2"
+            else:
+                gap, gap_to = 0.0, "?"
 
-            # Signal logic: outside top-3 = push; in top-3 with safe gap = coast
-            if my_rank == "?" or (isinstance(my_rank, int) and my_rank > 3):
-                signal = "ACCELERATE"
-            elif gap > 50:
-                signal = "SLOW DOWN"
-            elif gap > 20:
-                signal = "MAINTAIN"
+            # Top-2 qualify for the next cohort, so that's the line that matters.
+            if isinstance(my_rank, int) and my_rank <= 2:
+                signal = "QUALIFYING"
             else:
                 signal = "ACCELERATE"
 
@@ -112,8 +125,8 @@ class LeaderboardMonitor:
                 "my_volume": my_vol,
                 "my_pnl":    my_pnl,
                 "my_balance": my_bal,
-                "third_tx":  third_tx,
                 "gap":       gap,
+                "gap_to":    gap_to,
                 "signal":    signal,
                 "address":   LEADERBOARD_ADDRESS,
                 "live":      True,

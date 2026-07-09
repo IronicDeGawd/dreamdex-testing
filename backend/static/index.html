@@ -280,9 +280,11 @@
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">SOMI · gas</span><span id="b_somi">—</span></div>
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">WBTC · bag</span><span id="b_wbtc">—</span></div>
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">WETH · bag</span><span id="b_weth">—</span></div>
-                    <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Rank</span><span id="l_rank">—</span></div>
+                    <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Rank (by volume)</span><span id="l_rank">—</span></div>
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Volume</span><span id="l_vol">—</span></div>
-                    <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Gap to next</span><span id="l_gap">—</span></div>
+                    <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">PnL</span><span id="l_pnl">—</span></div>
+                    <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Tx count</span><span id="l_tx">—</span></div>
+                    <div class="table-row flex justify-between py-1.5"><span id="l_gaplabel" class="text-textMuted">Gap</span><span id="l_gap">—</span></div>
                 </div>
             </section>
         </div>
@@ -535,7 +537,11 @@ async function refreshLeaderboard(){
     const rank = l.my_rank!=null ? ("#"+l.my_rank+" / "+(l.total||"?")) : "—";
     $("l_rank").textContent = rank;
     $("l_vol").textContent = "$"+fmt(l.my_volume,0);
-    $("l_gap").textContent = l.gap!=null ? fmt(l.gap,0) : "—";
+    $("l_pnl").textContent = l.my_pnl!=null ? "$"+fmt(l.my_pnl,2) : "—";
+    $("l_pnl").className = (l.my_pnl||0) < 0 ? "text-warning" : "text-success";
+    $("l_tx").textContent = l.my_tx!=null ? fmt(l.my_tx,0) : "—";
+    $("l_gaplabel").textContent = l.gap_to ? ("Gap to "+l.gap_to) : "Gap";
+    $("l_gap").textContent = l.gap!=null ? "$"+fmt(l.gap,0) : "—";
     $("header-rank").textContent = l.my_rank!=null ? ("rank "+rank+" · $"+fmt(l.my_volume,0)) : "";
     $("header-rank").classList.remove("hidden");
     if(l.signal){ $("lb-signal").textContent=l.signal;
