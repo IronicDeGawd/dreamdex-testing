@@ -22,8 +22,21 @@ Every cap STOPS the loop and auto-flattens. Lessons baked in:
  - poll balances after each leg (settlement lag) so a slow read never skips a sell.
 """
 import os, time, math, signal, config
+import requests as _rq
 from web3 import Web3
 from trading.dreamdex import DreamDEX
+
+# A host/DNS/RPC outage is TRANSIENT — it must not burn the 5-strike trade breaker
+# and halt the run (halting risks the 24h-idle DQ). Back off and keep retrying;
+# the engine resumes the moment the network returns.
+NET_BACKOFF_S = [30, 60, 120, 300, 900]   # escalate to 15 min, then hold there
+def _is_network_err(e) -> bool:
+    if isinstance(e, (_rq.exceptions.RequestException, ConnectionError, TimeoutError, OSError)):
+        return True
+    s = str(e).lower()
+    return any(k in s for k in (
+        "nameresolution", "name resolution", "max retries exceeded", "connection",
+        "timed out", "timeout", "unreachable", "temporarily unavailable", "dns"))
 
 # Rule 5: eligible (non-stablecoin) pairs only. USDC.e:USDso must never be traded.
 ELIGIBLE = {"WBTC:USDso", "WETH:USDso", "SOMI:USDso"}
@@ -143,7 +156,7 @@ if PREAPPROVE:
         ensure_allowance(sp["pool"], sp["quote"], sp["qdec"], TARGET_VOLUME)
         ensure_allowance(sp["pool"], sp["base"],  sp["bdec"], TARGET_VOLUME / 1000.0)
 
-vol = 0.0; trips = 0; consec_fail = 0
+vol = 0.0; trips = 0; consec_fail = 0; _net_fails = 0
 _last_trade_ts = time.time()   # keepalive clock — reset on every successful trip
 from collections import deque
 COST_CEIL_PER_1K = float(os.environ.get("CLIMB_COST_CEIL_PER_1K", "0"))
@@ -314,6 +327,9 @@ for i in range(MAX_ITERS):
 
         vt = got*mid*2
         vol += vt; trips += 1; consec_fail = 0; _last_trade_ts = time.time()
+        if _net_fails:
+            print(f"[{i}] network recovered after {_net_fails} failed attempt(s)")
+            tg(f"🌐 Network back @ ${vol:,.0f} vol — trading resumed"); _net_fails = 0
         u, s = ub(), sb()
         cost_1k = ((u_now-u) + (s_now-s)*SOMI_PX)/vt*1000 if vt > 0 else 0.0
         _costs.append(cost_1k); roll = sum(_costs)/len(_costs)
@@ -330,9 +346,19 @@ for i in range(MAX_ITERS):
     except SystemExit:
         raise
     except Exception as e:
-        print(f"[{i}] EXC {str(e)[:120]}"); consec_fail += 1
         try: w.reset_nonce()
         except Exception: pass
+        if _is_network_err(e):
+            # Transient: host/DNS/RPC outage. Do NOT count toward the trade breaker
+            # and do NOT halt — back off (up to 15 min) and retry until it returns.
+            _net_fails += 1
+            wait = NET_BACKOFF_S[min(_net_fails - 1, len(NET_BACKOFF_S) - 1)]
+            print(f"[{i}] NETWORK error #{_net_fails} ({str(e)[:70]}) — retry in {wait}s (not a trade failure)")
+            if _net_fails == 1:
+                tg(f"🌐 Network down @ ${vol:,.0f} vol — backing off, will retry (engine stays alive)")
+            time.sleep(wait)
+            continue
+        print(f"[{i}] EXC {str(e)[:120]}"); consec_fail += 1
         time.sleep(2)
 
 stop("max iters reached")

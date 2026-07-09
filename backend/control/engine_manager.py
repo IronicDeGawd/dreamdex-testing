@@ -75,12 +75,17 @@ class EngineManager:
             return False
 
     def _container_alive(self) -> bool:
+        # Use Status, not Running: a container still booting reports Running=false
+        # while Status=created, and treating that as dead let the watchdog rm+relaunch
+        # a healthy engine mid-startup. A truly dead run is --rm'd, so inspect fails.
         try:
             out = subprocess.run(
-                ["docker", "inspect", "-f", "{{.State.Running}}", CONTAINER],
+                ["docker", "inspect", "-f", "{{.State.Status}}", CONTAINER],
                 capture_output=True, text=True, timeout=10,
             )
-            return out.returncode == 0 and out.stdout.strip() == "true"
+            if out.returncode != 0:
+                return False
+            return out.stdout.strip() in ("running", "created", "restarting", "paused")
         except (OSError, subprocess.SubprocessError):
             return False
 
@@ -180,6 +185,9 @@ class EngineManager:
 
         state = {
             "running":    True,
+            # Watchdog may relaunch this run if it dies on its own (crash, network,
+            # breaker). A deliberate dashboard stop clears the flag.
+            "autorestart": True,
             "mode":       mode,
             "params":     params,
             "pid":        proc.pid,
@@ -224,9 +232,26 @@ class EngineManager:
         st["running"] = False
         st["ended_at"] = time.time()
         st["end_reason"] = reason
+        # stop() is only ever called by the /stop endpoint — a deliberate stop.
+        # Clear the flag so the watchdog never resurrects a run you killed.
+        st["autorestart"] = False
         self._write_state(st)
         self.audit("stop", {"reason": reason, "was_running": was_running})
         return st
+
+    def clean_stop_reason(self) -> str | None:
+        """The engine prints '=== STOP: <reason> ===' when it stops ITSELF for a real
+        reason (target reached, bleed/gas cap, trade-failure breaker) and '...ABORT'
+        on a startup refusal. Either means: do not resurrect it. Returns the reason,
+        or None when the process vanished with no such line (crash / host / RPC kill),
+        which is the only case the watchdog restarts."""
+        st = self._read_state()
+        for line in reversed(self._tail(st.get("log_path"), 80)):
+            if "=== STOP:" in line:
+                return line.split("=== STOP:")[1].replace("===", "").strip() or "self-stop"
+            if "ABORT" in line:
+                return "startup abort"
+        return None
 
     # ── status ────────────────────────────────────────────────────────────
     def _tail(self, path: str, n: int) -> list[str]:
