@@ -289,6 +289,34 @@
             </section>
         </div>
 
+        <!-- Cohort efficiency -->
+        <section class="panel flex flex-col">
+            <div class="panel-header flex justify-between items-center">
+                <span>Cohort &amp; Efficiency</span>
+                <span class="text-textMuted normal-case" style="text-transform:none; font-size:11px">$/1k = burned per 1k volume (lower better) · runway = volume the balance still buys · ⚠ PnL/balance ignore inventory held mid-trade, so a trader mid-round-trip reads far worse than they are — treat as noisy</span>
+            </div>
+            <div class="p-0 overflow-x-auto">
+                <table class="w-full text-left font-mono text-xs whitespace-nowrap">
+                    <thead class="text-textMuted border-b border-border bg-surface">
+                        <tr>
+                            <th class="py-2 px-3 font-normal">#</th>
+                            <th class="py-2 px-3 font-normal">TRADER</th>
+                            <th class="py-2 px-3 font-normal text-right">VOLUME</th>
+                            <th class="py-2 px-3 font-normal text-right">24H</th>
+                            <th class="py-2 px-3 font-normal text-right">TX</th>
+                            <th class="py-2 px-3 font-normal text-right">BALANCE</th>
+                            <th class="py-2 px-3 font-normal text-right">PNL</th>
+                            <th class="py-2 px-3 font-normal text-right">$/1K</th>
+                            <th class="py-2 px-3 font-normal text-right">RUNWAY</th>
+                        </tr>
+                    </thead>
+                    <tbody id="cohort-tbody" class="divide-y divide-border">
+                        <tr><td colspan="9" class="py-4 text-center text-textMuted">Loading cohort…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
         <!-- Run Log -->
         <section class="panel flex flex-col">
             <div class="panel-header flex justify-between items-center">
@@ -548,6 +576,38 @@ async function refreshLeaderboard(){
       $("lb-signal").style.color = l.signal==="ACCELERATE"?"var(--c-danger)":"var(--c-success)"; }
   }catch(e){}
 }
+async function refreshCohort(){
+  try{
+    const d = await api("/cohort");
+    const rows = d.traders||[];
+    if(!rows.length){ $("cohort-tbody").innerHTML='<tr><td colspan="9" class="py-4 text-center text-textMuted">no data</td></tr>'; return; }
+    // best (lowest) $/1k among those actually trading — the efficiency leader
+    const costs = rows.filter(r=>r.cost_per_1k!=null && r.volume>0).map(r=>r.cost_per_1k);
+    const best = costs.length ? Math.min(...costs) : null;
+    $("cohort-tbody").innerHTML = rows.map(r=>{
+      const me = r.is_me;
+      const rowStyle = me ? 'style="background:var(--c-surface-2)"' : '';
+      const nameCol = me
+        ? `<span class="text-accent font-bold">${r.handle} (you)</span>`
+        : `<span class="text-textMain">${r.handle}</span>`;
+      const pnlCls = (r.pnl||0) < 0 ? "text-danger" : "text-success";
+      const cpk = r.cost_per_1k==null ? "—" : "$"+fmt(r.cost_per_1k,3);
+      const cpkCls = (best!=null && r.cost_per_1k===best) ? "text-success" : "";
+      const runway = r.runway_volume==null ? "∞" : "$"+fmt(r.runway_volume,0);
+      return `<tr class="table-row" ${rowStyle}>
+        <td class="py-1.5 px-3 text-textMuted">${r.rank}</td>
+        <td class="py-1.5 px-3">${nameCol} <span class="text-textMuted">${(r.address||"").slice(0,6)}…</span></td>
+        <td class="py-1.5 px-3 text-right">$${fmt(r.volume,0)}</td>
+        <td class="py-1.5 px-3 text-right text-textMuted">$${fmt(r.volume24h,0)}</td>
+        <td class="py-1.5 px-3 text-right text-textMuted">${fmt(r.tx,0)}</td>
+        <td class="py-1.5 px-3 text-right">$${fmt(r.balance,2)}</td>
+        <td class="py-1.5 px-3 text-right ${pnlCls}">$${fmt(r.pnl,2)}</td>
+        <td class="py-1.5 px-3 text-right ${cpkCls}">${cpk}</td>
+        <td class="py-1.5 px-3 text-right text-textMuted">${runway}</td>
+      </tr>`;
+    }).join("");
+  }catch(e){}
+}
 async function refreshLogs(){
   try{ const r=await api("/logs?n=120");
     $("logBox").textContent = (r.lines||[]).join("\n")||"— no log —";
@@ -555,7 +615,7 @@ async function refreshLogs(){
     const box=$("logBox"); box.scrollTop=box.scrollHeight;
   }catch(e){}
 }
-function refreshAll(){ refreshStatus(); refreshBalances(); refreshLeaderboard(); refreshLogs(); }
+function refreshAll(){ refreshStatus(); refreshBalances(); refreshLeaderboard(); refreshCohort(); refreshLogs(); }
 
 // ── boot ──────────────────────────────────────────────────────────────
 setMode("steady"); setSide("buy");
@@ -564,6 +624,7 @@ setInterval(refreshStatus,5000);
 setInterval(refreshLogs,5000);
 setInterval(refreshBalances,15000);
 setInterval(refreshLeaderboard,60000);
+setInterval(refreshCohort,60000);
 </script>
 </body>
 </html>
