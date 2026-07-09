@@ -226,28 +226,93 @@ def _on_term(signum, frame):
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, _on_term)
 
-def pick_cheapest():
-    """Return (spec, ob, spread_pct, within_gate). Always returns the tightest-spread
-    pair that has a live book (or (None,None,None,False) if no book). within_gate is
-    False when even the cheapest exceeds SPREAD_GATE_PCT — the caller pauses, unless
-    it must force a keepalive trip."""
+def book_levels(pair, n=8):
+    """Top n levels each side: ([(price,qty)...bids], [(price,qty)...asks])."""
+    r = _rq.get(f"{config.DREAMDEX_HTTP}/v0/orderbooks", params={"symbols": pair}, timeout=6)
+    r.raise_for_status()
+    d = r.json()
+    if isinstance(d, dict) and d.get("orderbooks"):
+        b = d["orderbooks"][0]
+    elif isinstance(d, list) and d:
+        b = d[0]
+    else:
+        b = d
+    def side(k):
+        out = []
+        for L in (b.get(k) or [])[:n]:
+            if isinstance(L, dict):
+                out.append((float(L["price"]), float(L.get("quantity", L.get("size", 0)))))
+            else:
+                out.append((float(L[0]), float(L[1])))
+        return out
+    return side("bids"), side("asks")
+
+def _vwap(levels, need):
+    """Volume-weighted fill price for `need` base walking down the levels.
+    None when the visible book can't cover it."""
+    filled = cost = 0.0
+    for p, q in levels:
+        take = min(q, need - filled)
+        if take <= 0:
+            break
+        cost += take * p; filled += take
+        if filled >= need * 0.999:
+            return cost / filled
+    return None
+
+def eff_spread_pct(bids, asks, leg_usd):
+    """The spread we ACTUALLY pay for a leg of this size — buy VWAP vs sell VWAP.
+    Equals the quoted spread when top-of-book covers us; worse when we'd walk.
+    None = not enough visible depth (that pair would slip badly; skip it)."""
+    if not bids or not asks:
+        return None
+    mid = (bids[0][0] + asks[0][0]) / 2
+    if mid <= 0:
+        return None
+    need = leg_usd / mid
+    buy, sell = _vwap(asks, need), _vwap(bids, need)
+    if buy is None or sell is None:
+        return None
+    return (buy - sell) / mid * 100
+
+def pick_cheapest(leg_usd):
+    """Pick the pair with the lowest EFFECTIVE spread for a leg of `leg_usd` — i.e.
+    what we'd really pay after walking the book — not the top-of-book quote. A pair
+    whose visible depth can't absorb our order is skipped: WETH's touch often holds
+    less than an $80 leg, so its quoted spread understates the true cost by ~50%.
+
+    Returns (spec, ob, eff_pct, quoted_pct, within_gate); (None,...) if no pair
+    has a usable book. Falls back to top-of-book if the depth fetch fails."""
     best = None
     for sp in SPECS.values():
         try:
-            ob = dex.get_orderbook(sp["pair"])
+            bids, asks = book_levels(sp["pair"])
+            if not bids or not asks:
+                continue
+            ob = {"bid": bids[0][0], "ask": asks[0][0]}
+            mid = (ob["bid"] + ob["ask"]) / 2
+            quoted = (ob["ask"] - ob["bid"]) / mid * 100
+            eff = eff_spread_pct(bids, asks, leg_usd)
+            if eff is None:
+                print(f"  {sp['pair']}: visible book too thin for a ${leg_usd:.0f} leg — skip")
+                continue
         except Exception:
-            continue
-        if not ob.get("bid") or not ob.get("ask"):
-            continue
-        mid = (ob["bid"]+ob["ask"])/2
-        spread_pct = (ob["ask"]-ob["bid"])/mid*100
-        if best is None or spread_pct < best[2]:
-            best = (sp, ob, spread_pct)
+            # depth endpoint hiccup — fall back to top-of-book for this pair
+            try:
+                ob = dex.get_orderbook(sp["pair"])
+            except Exception:
+                continue
+            if not ob.get("bid") or not ob.get("ask"):
+                continue
+            mid = (ob["bid"] + ob["ask"]) / 2
+            quoted = eff = (ob["ask"] - ob["bid"]) / mid * 100
+        if best is None or eff < best[2]:
+            best = (sp, ob, eff, quoted)
     if best is None:
-        return None, None, None, False
-    sp, ob, spread_pct = best
-    within = not (SPREAD_GATE_PCT > 0 and spread_pct > SPREAD_GATE_PCT)
-    return sp, ob, spread_pct, within
+        return None, None, None, None, False
+    sp, ob, eff, quoted = best
+    within = not (SPREAD_GATE_PCT > 0 and eff > SPREAD_GATE_PCT)
+    return sp, ob, eff, quoted, within
 
 for i in range(MAX_ITERS):
     try:
@@ -266,15 +331,17 @@ for i in range(MAX_ITERS):
                 print(f"[{i}] stray bag on {_sp['pair']} {bb(_sp):.6f} — flattening first")
                 flatten_all(); break
 
-        sp, ob, spread_pct, within = pick_cheapest()
+        # Rank by the spread we'd ACTUALLY pay at our leg size, not the quote.
+        sp, ob, spread_pct, quoted_pct, within = pick_cheapest(LEG_USD)
         if sp is None:
-            print(f"[{i}] no live book on any pair — pause {PAUSE_EXP_S:.0f}s"); time.sleep(PAUSE_EXP_S); continue
+            print(f"[{i}] no pair with a book deep enough for a ${LEG_USD:.0f} leg — pause {PAUSE_EXP_S:.0f}s")
+            time.sleep(PAUSE_EXP_S); continue
 
         idle_s = time.time() - _last_trade_ts
         force_keepalive = (not within) and idle_s > LIVENESS_S
         if not within and not force_keepalive:
-            if not _paused: tg(f"⏸ Paused @ ${vol:,.0f} vol — cheapest spread {spread_pct:.3f}% > gate {SPREAD_GATE_PCT}%"); _paused = True
-            print(f"[{i}] cheapest {spread_pct:.3f}% > gate {SPREAD_GATE_PCT}% — pause {PAUSE_EXP_S:.0f}s (idle {idle_s/3600:.1f}h)")
+            if not _paused: tg(f"⏸ Paused @ ${vol:,.0f} vol — cheapest effective spread {spread_pct:.3f}% > gate {SPREAD_GATE_PCT}%"); _paused = True
+            print(f"[{i}] cheapest eff {spread_pct:.3f}% (quoted {quoted_pct:.3f}%) > gate {SPREAD_GATE_PCT}% — pause {PAUSE_EXP_S:.0f}s (idle {idle_s/3600:.1f}h)")
             time.sleep(PAUSE_EXP_S); continue
 
         leg_this = LEG_USD
@@ -333,8 +400,10 @@ for i in range(MAX_ITERS):
         u, s = ub(), sb()
         cost_1k = ((u_now-u) + (s_now-s)*SOMI_PX)/vt*1000 if vt > 0 else 0.0
         _costs.append(cost_1k); roll = sum(_costs)/len(_costs)
-        print(f"[{i}] trip {trips} {tag} @spread {spread_pct:.3f}%: vol+=${vt:.2f} tot=${vol:.2f} "
-              f"USDso={u:.4f}(bleed ${u_start-u:.4f}) SOMI={s:.4f} | cost ${cost_1k:.3f}/1k roll ${roll:.3f}/1k")
+        impact = spread_pct - quoted_pct
+        print(f"[{i}] trip {trips} {tag} @eff {spread_pct:.3f}% (quoted {quoted_pct:.3f}%, impact +{impact:.3f}%): "
+              f"vol+=${vt:.2f} tot=${vol:.2f} USDso={u:.4f}(bleed ${u_start-u:.4f}) SOMI={s:.4f} "
+              f"| cost ${cost_1k:.3f}/1k roll ${roll:.3f}/1k")
         if _paused and (COST_CEIL_PER_1K <= 0 or roll <= COST_CEIL_PER_1K):
             tg(f"▶️ Resumed @ ${vol:,.0f} vol — cost ${roll:.3f}/1k (under ceil)"); _paused = False
         if vol >= _last_ms + TG_MS:
