@@ -41,7 +41,7 @@ AGENT_FUNDING_SOURCE = os.environ.get("AGENT_FUNDING_SOURCE", "wallet")  # "vaul
 # ── Timing ────────────────────────────────────────────────
 AGENT_LOOP_SECONDS = int(os.environ.get("AGENT_LOOP_SECONDS", 300))
 PRICE_POLL_SECONDS = 30
-LEADERBOARD_POLL   = 300
+LEADERBOARD_POLL   = int(os.environ.get("LEADERBOARD_POLL", 120))  # dashboard rank/volume freshness
 PRICE_HISTORY_LEN  = 12
 
 # ── OpenAI (R2 legacy — used only by archived agent/brain.py) ─────────────
