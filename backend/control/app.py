@@ -74,8 +74,9 @@ if not MOCK and not API_KEY:
 class MockBackend:
     """Deterministic stub data for local UI dev — no chain, no keys."""
     def balances(self):
-        return {"usdso": 200.0, "somi": 30.0, "weth": 0.0,
-                "usdso_vault": 0.0, "total_usdso": 200.0}
+        return {"usdso": 200.0, "somi": 30.0, "usdso_vault": 0.0, "total_usdso": 200.0,
+                "bags": {"WBTC:USDso": 0.0, "WETH:USDso": 0.0},
+                "wbtc": 0.0, "weth": 0.0}
 
     def free_usdso(self):
         return 200.0
@@ -112,16 +113,27 @@ class LiveBackend:
         return self.portfolio.summary()
 
     def balances(self):
+        # Read the wallet FRESH — the engine rotates pairs, so a bag can sit on any
+        # of them and a 60s-cached snapshot would hide it (WBTC was invisible before).
         s = self._summary()
-        weth = 0.0
-        wb = s.get("wallet_base", {}).get("WETH:USDso")
-        if wb:
-            weth = wb.get("qty", 0.0)
         vault = sum(s.get("usdso_vaults", {}).values())
-        usdso = s.get("usdso_wallet", 0.0)
-        return {"usdso": round(usdso, 4), "somi": round(s.get("native_balance", 0.0), 4),
-                "weth": round(weth, 6), "usdso_vault": round(vault, 4),
-                "total_usdso": round(usdso + vault, 4)}
+        try:
+            usdso = self.dex.wallet.erc20_balance(self.cfg.USDSO_ADDRESS, 18)
+            somi = self.dex.wallet.native_balance()
+        except Exception:
+            usdso = s.get("usdso_wallet", 0.0); somi = s.get("native_balance", 0.0)
+        bags = {}
+        for pair, m in self.cfg.MARKETS.items():
+            if pair not in ELIGIBLE_PAIRS or m.get("native") or int(str(m["base"]), 16) == 0:
+                continue
+            try:
+                bags[pair] = round(self.dex.wallet.erc20_balance(m["base"], int(m["baseDecimals"])), 8)
+            except Exception:
+                bags[pair] = 0.0
+        return {"usdso": round(usdso, 4), "somi": round(somi, 4),
+                "usdso_vault": round(vault, 4), "total_usdso": round(usdso + vault, 4),
+                "bags": bags,
+                "wbtc": bags.get("WBTC:USDso", 0.0), "weth": bags.get("WETH:USDso", 0.0)}
 
     def free_usdso(self):
         # FRESH on-chain read — the leg guard must not use the 60s-cached poll
@@ -350,6 +362,46 @@ def stop(_=Depends(require_key)):
     except Exception as e:
         flat = {"status": "error", "error": str(e)[:160]}
     return {"ok": True, "state": st, "flatten": flat}
+
+
+@app.post("/autorestart")
+def autorestart(_=Depends(require_key)):
+    """Watchdog hook (cron, every 15 min). Relaunches the last run ONLY when it died
+    unexpectedly — a crash, host/RPC kill, or the container vanishing. It refuses to
+    restart after a deliberate /stop, or after the engine stopped itself for a real
+    reason (target reached, bleed/gas cap, trade-failure breaker, startup abort)."""
+    if engine.is_running():
+        return {"action": "none", "reason": "engine already running"}
+    st = engine._read_state()
+    if not st:
+        return {"action": "none", "reason": "no run on record"}
+    if not st.get("autorestart"):
+        return {"action": "none", "reason": "deliberately stopped — will not restart"}
+    # Startup grace: never resurrect a run that only just launched (the container
+    # can read as not-yet-running while it boots).
+    if _time.time() - (st.get("started_at") or 0) < 180:
+        return {"action": "none", "reason": "run started <3m ago — still booting"}
+    clean = engine.clean_stop_reason()
+    if clean:
+        return {"action": "none", "reason": f"engine self-stopped ({clean}) — will not restart"}
+
+    mode = st.get("mode"); params = dict(st.get("params") or {})
+    if not mode or "target" not in params:
+        return {"action": "none", "reason": "no saved params"}
+    # Capital may have shrunk since the original launch — clamp the leg so the
+    # relaunch can't trip the pre-revert guard.
+    try:
+        free = backend.free_usdso()
+        if free and params.get("leg", 0) > 0.8 * free:
+            params["leg"] = round(0.8 * free, 2)
+    except Exception:
+        pass
+    try:
+        engine.launch(mode, params)
+    except EngineError as e:
+        return {"action": "failed", "error": str(e)}
+    engine.audit("autorestart", {"mode": mode, "params": params, "after": st.get("end_reason")})
+    return {"action": "relaunched", "mode": mode, "params": params}
 
 
 @app.post("/gas/topup")
