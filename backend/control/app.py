@@ -86,6 +86,19 @@ class MockBackend:
                 "my_tx": 1176, "gap": 51823.64, "gap_to": "#2",
                 "signal": "ACCELERATE", "live": True}
 
+    def cohort(self):
+        return [
+            {"rank":1,"handle":"trader-6","address":"0x63A9","tx":4527,"volume":224800.27,
+             "volume24h":224800.27,"pnl":-32.84,"balance":117.16,"cost_per_1k":0.146,
+             "runway_volume":802466,"avg_tx":49.66,"is_me":False},
+            {"rank":2,"handle":"trader-4","address":"0x99e9","tx":1911,"volume":143667.54,
+             "volume24h":143667.54,"pnl":-118.23,"balance":31.77,"cost_per_1k":0.823,
+             "runway_volume":38602,"avg_tx":75.18,"is_me":False},
+            {"rank":3,"handle":"trader-1","address":"0x703e","tx":1176,"volume":91843.9,
+             "volume24h":91843.9,"pnl":-13.83,"balance":136.17,"cost_per_1k":0.151,
+             "runway_volume":901788,"avg_tx":78.10,"is_me":True},
+        ]
+
     def gas_topup(self, somi_usdso):
         return {"status": "success", "mock": True, "spent_usdso": somi_usdso}
 
@@ -151,6 +164,9 @@ class LiveBackend:
                 "my_tx": st.get("my_tx", 0),
                 "gap": st.get("gap"), "gap_to": st.get("gap_to"),
                 "signal": st.get("signal"), "live": st.get("live")}
+
+    def cohort(self):
+        return self.lb.get_cohort()
 
     def gas_topup(self, somi_usdso):
         ob = self.dex.get_orderbook("SOMI:USDso")
@@ -303,6 +319,13 @@ def balances(_=Depends(require_key)):
 @app.get("/leaderboard")
 def leaderboard(_=Depends(require_key)):
     return backend.leaderboard()
+
+
+@app.get("/cohort")
+def cohort(_=Depends(require_key)):
+    """Every trader in the cohort, volume-ranked, with efficiency ($ burned per 1k
+    volume) and runway (volume their remaining balance still buys)."""
+    return {"traders": backend.cohort()}
 
 
 @app.get("/logs")

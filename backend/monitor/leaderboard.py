@@ -21,6 +21,7 @@ class LeaderboardMonitor:
             "address":  LEADERBOARD_ADDRESS,
             "live":     False,  # flips True after first successful fetch
         }
+        self.cohort = []   # every trader, volume-ranked, with efficiency metrics
         self.running = False
 
     def start(self):
@@ -117,6 +118,42 @@ class LeaderboardMonitor:
             else:
                 signal = "ACCELERATE"
 
+            # Per-trader efficiency. The board defines PnL = usdsoBalance - 150, so a
+            # negative PnL is capital burned. cost_per_1k = $ burned per 1k of volume
+            # (lower is better); runway = how much MORE volume their remaining balance
+            # buys at that burn rate. Caveat: balance excludes inventory held mid-trade,
+            # so a trader caught mid-round-trip looks momentarily worse than they are.
+            cohort = []
+            for idx, e in enumerate(lb):
+                v = vol_of(e); tx = tx_of(e)
+                try: pnl = float(e.get("pnl") or 0)
+                except (TypeError, ValueError): pnl = 0.0
+                try: bal = float(e.get("usdsoBalance") or 0)
+                except (TypeError, ValueError): bal = 0.0
+                burned = max(-pnl, 0.0)
+                # Needs enough volume to be meaningful — a trader with ~0 volume and a
+                # nonzero loss yields an absurd ratio (683,285/1k). Below the floor: n/a.
+                cpk = round(burned / v * 1000, 3) if v >= 100 else None
+                runway = round(bal / cpk * 1000) if (cpk and cpk > 0) else None
+                try: v24 = float(e.get("volumeUsdso24h") or 0)
+                except (TypeError, ValueError): v24 = 0.0
+                addr = str(e.get("address", ""))
+                cohort.append({
+                    "rank": idx + 1,
+                    "handle": e.get("handle") or "—",
+                    "address": addr,
+                    "tx": tx,
+                    "volume": v,
+                    "volume24h": v24,
+                    "pnl": pnl,
+                    "balance": bal,
+                    "cost_per_1k": cpk,          # None = no volume; 0 = not burning
+                    "runway_volume": runway,     # None = infinite (profitable / no burn)
+                    "avg_tx": round(v / tx, 2) if tx else None,
+                    "is_me": addr.lower() == target,
+                })
+            self.cohort = cohort
+
             self.stats = {
                 "my_rank":   my_rank,
                 "total":     total,
@@ -136,3 +173,7 @@ class LeaderboardMonitor:
 
     def get_my_stats(self) -> dict:
         return self.stats
+
+    def get_cohort(self) -> list:
+        """Every trader, volume-ranked, with efficiency + runway. `is_me` marks ours."""
+        return self.cohort
