@@ -293,7 +293,7 @@
         <section class="panel flex flex-col">
             <div class="panel-header flex justify-between items-center">
                 <span>Cohort &amp; Efficiency</span>
-                <span class="text-textMuted normal-case" style="text-transform:none; font-size:11px">$/1k = burned per 1k volume (lower better) · runway = volume the balance still buys · ⚠ PnL/balance ignore inventory held mid-trade, so a trader mid-round-trip reads far worse than they are — treat as noisy</span>
+                <span class="text-textMuted normal-case" style="text-transform:none; font-size:11px">$/1k = burned per 1k volume (lower better) · runway = extra volume the balance buys, keeping a $15 reserve · balances are flat-state (inventory-corrected): ✓ = read on-chain, ⟳ = mid-round-trip right now</span>
             </div>
             <div class="p-0 overflow-x-auto">
                 <table class="w-full text-left font-mono text-xs whitespace-nowrap">
@@ -587,9 +587,13 @@ async function refreshCohort(){
     $("cohort-tbody").innerHTML = rows.map(r=>{
       const me = r.is_me;
       const rowStyle = me ? 'style="background:var(--c-surface-2)"' : '';
+      const mark = r.mid_trade
+        ? ` <span class="text-warning" title="currently mid-round-trip — holding inventory; balance/PnL shown are the flat-state estimate">⟳</span>`
+        : ``;
+      const src = r.onchain ? ` <span class="text-success" title="read on-chain, exact">✓</span>` : ``;
       const nameCol = me
-        ? `<span class="text-accent font-bold">${r.handle} (you)</span>`
-        : `<span class="text-textMain">${r.handle}</span>`;
+        ? `<span class="text-accent font-bold">${r.handle} (you)</span>${src}${mark}`
+        : `<span class="text-textMain">${r.handle}</span>${mark}`;
       const pnlCls = (r.pnl||0) < 0 ? "text-danger" : "text-success";
       const cpk = r.cost_per_1k==null ? "—" : "$"+fmt(r.cost_per_1k,3);
       const cpkCls = (best!=null && r.cost_per_1k===best) ? "text-success" : "";
