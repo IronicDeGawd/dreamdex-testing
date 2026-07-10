@@ -130,6 +130,29 @@ ERC20 = [
  {"name":"allowance","type":"function","stateMutability":"view",
   "inputs":[{"name":"o","type":"address"},{"name":"s","type":"address"}],"outputs":[{"name":"","type":"uint256"}]},
 ]
+VAULT_ABI = [
+ {"name":"getWithdrawableBalance","type":"function","stateMutability":"view",
+  "inputs":[{"name":"user","type":"address"},{"name":"token","type":"address"}],
+  "outputs":[{"name":"","type":"uint256"}]},
+]
+
+def vault_usdso():
+    """USDso sitting inside the pools — an unfilled BUY RESERVES quote there, so it
+    leaves the wallet without being spent. Counting only the wallet made a reserved
+    order look like a ~$100 loss and falsely tripped the bleed cap."""
+    tot = 0.0
+    for sp in SPECS.values():
+        try:
+            c = w.w3.eth.contract(address=sp["pool"], abi=VAULT_ABI)
+            tot += c.functions.getWithdrawableBalance(
+                w.address, Web3.to_checksum_address(sp["quote"])).call() / (10 ** sp["qdec"])
+        except Exception:
+            pass
+    return tot
+
+def usdso_total():
+    """True USDso capital: free in the wallet + reserved/withdrawable in the pools."""
+    return ub() + vault_usdso()
 def ensure_allowance(pool, token, dec, need_human):
     c = w.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20)
     cur = c.functions.allowance(w.address, pool).call() / (10 ** dec)
@@ -144,8 +167,8 @@ def ensure_allowance(pool, token, dec, need_human):
 print(f"=== VOLUME CLIMB (rotating) pairs={PAIRS} ===")
 print(f"target=${TARGET_VOLUME} leg=${LEG_USD} slip={SLIP_PCT*100}% "
       f"caps: gas<{MAX_GAS_SOMI} floor={SOMI_FLOOR} bleed<${MAX_USDSO_BLEED} iters<{MAX_ITERS}")
-u_start, s_start = ub(), sb()
-print(f"START USDso={u_start:.4f} SOMI={s_start:.4f}")
+u_start, s_start = usdso_total(), sb()
+print(f"START USDso={u_start:.4f} (wallet+reserved) SOMI={s_start:.4f}")
 for sp in SPECS.values():
     if bb(sp) > sp["minq"]:
         print(f"!! starting base for {sp['pair']} > min — NOT flat. ABORT."); raise SystemExit(1)
@@ -216,7 +239,7 @@ def flatten_all(max_attempts=None):
 
 def stop(reason):
     flatten_all()
-    u, s = ub(), sb()
+    u, s = usdso_total(), sb()
     print(f"\n=== STOP: {reason} ===")
     bags = {p: bb(sp) for p, sp in SPECS.items() if bb(sp) > sp["minq"]}
     print(f"trips={trips} volume=${vol:.2f} USDso_bleed=${u_start-u:.4f} gas={s_start-s:.4f} SOMI residual={bags}")
@@ -333,19 +356,27 @@ def pick_cheapest(leg_usd):
 for i in range(MAX_ITERS):
     try:
         if vol >= TARGET_VOLUME: stop("target volume reached")
-        s_now, u_now = sb(), ub()
+
+        # Sweep stray bags FIRST, so the capital checks below measure a flat wallet.
+        # A prior trip's sell may have failed on a pair the rotation isn't currently
+        # picking, and base inventory hides value from the USDso reading.
+        bagged = [sp for sp in SPECS.values() if bb(sp) > sp["minq"]]
+        if bagged:
+            print(f"[{i}] stray bag on {[sp['pair'] for sp in bagged]} — flattening first")
+            flatten_all()
+            bagged = [sp for sp in SPECS.values() if bb(sp) > sp["minq"]]
+
+        s_now = sb()
+        u_now = usdso_total()   # wallet + reserved-in-pool, never wallet alone
         if s_start - s_now >= MAX_GAS_SOMI: stop("max gas hit")
         if s_now <= SOMI_FLOOR: stop("SOMI floor hit")
-        if u_start - u_now >= MAX_USDSO_BLEED: stop("max USDso bleed hit")
+        # Only trust the bleed reading when flat: base inventory we couldn't sell
+        # would otherwise read as a loss and stop a perfectly healthy run.
+        if bagged:
+            print(f"[{i}] holding {[sp['pair'] for sp in bagged]} — skipping bleed check this pass")
+        elif u_start - u_now >= MAX_USDSO_BLEED:
+            stop("max USDso bleed hit")
         if consec_fail >= MAX_CONSEC_FAIL: stop(f"{MAX_CONSEC_FAIL} consecutive failures")
-
-        # Sweep ALL pairs for a stray bag before trading — a prior trip's sell may
-        # have failed on a pair the rotation isn't currently picking, which would
-        # otherwise ride invisibly. Flatten it first (not a hard stop).
-        for _sp in SPECS.values():
-            if bb(_sp) > _sp["minq"]:
-                print(f"[{i}] stray bag on {_sp['pair']} {bb(_sp):.6f} — flattening first")
-                flatten_all(); break
 
         # Rank by the spread we'd ACTUALLY pay at our leg size, not the quote.
         sp, ob, spread_pct, quoted_pct, within = pick_cheapest(LEG_USD)
@@ -418,7 +449,7 @@ for i in range(MAX_ITERS):
         if _net_fails:
             print(f"[{i}] network recovered after {_net_fails} failed attempt(s)")
             tg(f"🌐 Network back @ ${vol:,.0f} vol — trading resumed"); _net_fails = 0
-        u, s = ub(), sb()
+        u, s = usdso_total(), sb()
         cost_1k = ((u_now-u) + (s_now-s)*SOMI_PX)/vt*1000 if vt > 0 else 0.0
         _costs.append(cost_1k); roll = sum(_costs)/len(_costs)
         impact = spread_pct - quoted_pct
