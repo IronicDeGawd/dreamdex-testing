@@ -25,6 +25,9 @@ __pycache__/
 .venv/
 venv/
 
+# Control API runtime state (engine.json, audit.log, per-run logs, venv)
+backend/control/state/
+
 # Arduino build artifacts
 build/
 *.bin

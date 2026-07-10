@@ -1,0 +1,5 @@
+# Control API extra deps (on top of backend/requirements.txt).
+# Kept separate so the trading-engine Docker image stays lean — only the
+# host-run control service installs these.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0

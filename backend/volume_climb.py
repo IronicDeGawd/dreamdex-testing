@@ -1,37 +1,54 @@
 #!/usr/bin/env python3
-"""R3 volume-climb engine — WETH:USDso taker round-trip churn. Ends flat. Hard-capped.
+"""Volume-climb engine — taker round-trip churn across eligible pairs. Ends flat.
 
-Why this exists: R3 ranks by effective volume = raw x (1 + PnL%). Raw volume still
-dominates the rank (leaders are deeply unprofitable yet top). Flat round-trip churn
-(buy then immediately sell the same size back) generates raw volume while holding ~zero
-inventory, so PnL stays ~flat (multiplier ~1.0) — strictly better than the leaders'
-discounted multipliers, and bear-proof. Toll on WETH is ~zero (spread 0.02%); gas is the
-only real cost, minimised with big-ish legs + a one-time approval.
+Buys then immediately sells the same size back, generating raw volume while holding
+~zero inventory. The only cost is the spread crossed (toll) + gas, so it trades the
+CHEAPEST book available.
 
-PROVEN: drove ~30k volume in one run for ~$2.4 USDso bleed + ~6 SOMI gas, ended flat.
+DYNAMIC ROTATION (R4): pass CLIMB_PAIRS as a comma list (e.g.
+"WBTC:USDso,WETH:USDso,SOMI:USDso"). Each round-trip it reads every pair's live
+book and trades whichever has the tightest spread that clears the gate — so it
+auto-rotates to the cheapest chain as liquidity shifts. A single CLIMB_PAIR still
+works (behaves like the old single-pair engine).
 
-Run on the server via the agent container (reads MAINNET_PRIVATE_KEY from its env):
-  cd ~/dreamdex-r3/backend && docker compose run --rm --no-deps -T \
-    -e CLIMB_TARGET_VOLUME=30000 -e CLIMB_LEG_USD=15 -e CLIMB_SLIP_PCT=0.003 \
-    -e CLIMB_MAX_GAS_SOMI=8 -e CLIMB_SOMI_FLOOR=8 -e CLIMB_MAX_USDSO_BLEED=15 \
-    -e CLIMB_MAX_ITERS=1300 -e CLIMB_PAUSE_S=0.4 -e CLIMB_PREAPPROVE=1 \
-    agent python3 volume_climb.py
-NOTE: an SSH drop kills the *viewing* pipe but the container keeps running detached —
-follow it with `docker logs -f backend-agent-run-<id>`. Container is --rm so logs vanish
-on exit; confirm the result on-chain (WETH balance ~0 = flat) + leaderboard, not the log.
+Per-pair correctness (this is what made WBTC fail before): price is snapped to the
+pair's TICK size (WBTC tick=0.1), qty to its LOT, and tick/lot/min are read AFTER
+DreamDEX() refreshes market params (the defaults are wrong).
 
-Every cap STOPS the loop. Lessons baked in:
- - taker IOC needs a WIDE protective limit (~0.3%) to cross the JIT-defended book; it fills
-   at the touch, so the wide limit costs nothing (free insurance). +5 ticks => no-match.
- - one-time pre-approval avoids a re-approval tx on every leg (allowance is consumed
-   cumulatively by transferFrom, so approve >= target volume).
- - poll balances after each leg (settlement lag) so a slow read never skips a sell -> bag.
+Every cap STOPS the loop and auto-flattens. Lessons baked in:
+ - taker IOC needs a protective limit that crosses the touch (buy ask+slip, sell
+   bid-slip); it fills at the touch so the wide limit is free insurance.
+ - one-time pre-approval per pool avoids a re-approval tx on every leg.
+ - poll balances after each leg (settlement lag) so a slow read never skips a sell.
 """
-import os, time, config
+import os, time, math, signal, config
+import requests as _rq
 from web3 import Web3
 from trading.dreamdex import DreamDEX
 
-PAIR  = os.environ.get("CLIMB_PAIR", "WETH:USDso")
+# A host/DNS/RPC outage is TRANSIENT — it must not burn the 5-strike trade breaker
+# and halt the run (halting risks the 24h-idle DQ). Back off and keep retrying;
+# the engine resumes the moment the network returns.
+NET_BACKOFF_S = [30, 60, 120, 300, 900]   # escalate to 15 min, then hold there
+def _is_network_err(e) -> bool:
+    if isinstance(e, (_rq.exceptions.RequestException, ConnectionError, TimeoutError, OSError)):
+        return True
+    s = str(e).lower()
+    return any(k in s for k in (
+        "nameresolution", "name resolution", "max retries exceeded", "connection",
+        "timed out", "timeout", "unreachable", "temporarily unavailable", "dns"))
+
+# Rule 5: eligible (non-stablecoin) pairs only. USDC.e:USDso must never be traded.
+ELIGIBLE = {"WBTC:USDso", "WETH:USDso", "SOMI:USDso"}
+# Force a keepalive trade before this many idle seconds so a market-wide spread
+# widening can't leave us idle >24h and get us auto-DQ'd (rule 11). 18h margin.
+LIVENESS_S    = float(os.environ.get("CLIMB_LIVENESS_S", str(18 * 3600)))
+KEEPALIVE_LEG = float(os.environ.get("CLIMB_KEEPALIVE_LEG", "5"))
+
+# Pair list: CLIMB_PAIRS (comma) takes precedence; else CLIMB_PAIR (single).
+_pairs_env = os.environ.get("CLIMB_PAIRS", os.environ.get("CLIMB_PAIR", "WETH:USDso"))
+PAIRS = [p.strip() for p in _pairs_env.split(",") if p.strip()]
+
 TARGET_VOLUME   = float(os.environ.get("CLIMB_TARGET_VOLUME", "300"))
 LEG_USD         = float(os.environ.get("CLIMB_LEG_USD", "15"))
 SLIP_PCT        = float(os.environ.get("CLIMB_SLIP_PCT", "0.003"))
@@ -42,33 +59,70 @@ MAX_ITERS       = int(os.environ.get("CLIMB_MAX_ITERS", "1300"))
 PAUSE_S         = float(os.environ.get("CLIMB_PAUSE_S", "0.4"))
 PREAPPROVE      = os.environ.get("CLIMB_PREAPPROVE", "1") == "1"
 MAX_CONSEC_FAIL = 5
-# Thin-book sell resilience: a residual after the first two sells means the bid
-# briefly lacked depth, not a fault. Pause and retry the residual with widening
-# slippage, waiting for the book to refill, before ever giving up with a bag.
 RESID_RETRIES   = int(os.environ.get("CLIMB_RESID_RETRIES", "8"))
 RESID_WAIT_S    = float(os.environ.get("CLIMB_RESID_WAIT_S", "4"))
 
-mkt = config.MARKETS[PAIR]
-BASE = mkt["base"]; BDEC = int(mkt["baseDecimals"])
-QUOTE = mkt["quote"]; QDEC = int(mkt["quoteDecimals"])
-POOL = Web3.to_checksum_address(mkt["contract"])
-LOT  = float(mkt.get("lotSize", 0.0001)); MINQ = float(mkt.get("minQuantity", LOT))
+dex = DreamDEX(); w = dex.wallet   # constructor refreshes config.MARKETS in place
+# Re-run the refresh WITHOUT swallowing — a boot-time network blip leaves tick/lot
+# at wrong defaults (WBTC tick is really 0.1), which turns every order into an
+# invalid_price revert loop. Abort cleanly instead of silently degrading.
+try:
+    dex.refresh_market_params()
+except Exception as e:
+    print(f"!! market-param refresh failed at boot: {e} — ABORT (tick/lot would be wrong)")
+    raise SystemExit(1)
 
-dex = DreamDEX(); w = dex.wallet
-def ub(): return w.erc20_balance(QUOTE, QDEC)
-def bb(): return w.erc20_balance(BASE, BDEC)
-def sb(): return w.native_balance()
-def snap_lot(q):
-    n = max(round(q/LOT), 1); q = round(n*LOT, 10)
-    return q if q >= MINQ else round(MINQ, 10)
-def poll_base(target_cmp, want_above, timeout=3.0):
+# Per-pair spec, read AFTER the refresh so tick/lot/min are the real values.
+def spec_for(pair):
+    m = config.MARKETS[pair]
+    lot = float(m.get("lotSize", 0.0001))
+    return {
+        "pair":  pair,
+        "base":  m["base"],  "bdec": int(m["baseDecimals"]),
+        "quote": m["quote"], "qdec": int(m["quoteDecimals"]),
+        "pool":  Web3.to_checksum_address(m["contract"]),
+        "tick":  float(m.get("tickSize", 0.01)),
+        "lot":   lot,
+        "minq":  float(m.get("minQuantity", lot)),
+    }
+# Only ERC20-base pairs work with this round-trip path. Native-base pairs (SOMI,
+# base = 0x0) need the payable depositNative flow — skip them (also the widest
+# book, so no loss). This prevents a balanceOf(0x0) crash on startup.
+SPECS = {}
+for p in PAIRS:
+    if p not in ELIGIBLE:
+        print(f"  skip {p}: not an eligible pair (rule 5) — refusing to trade it")
+        continue
+    m = config.MARKETS[p]
+    if m.get("native") or int(str(m["base"]), 16) == 0:
+        print(f"  skip {p}: native-base pair not supported by the ERC20 round-trip path")
+        continue
+    SPECS[p] = spec_for(p)
+if not SPECS:
+    print("!! no tradeable ERC20 pairs in CLIMB_PAIRS — ABORT"); raise SystemExit(1)
+PAIRS = list(SPECS.keys())
+QUOTE = SPECS[PAIRS[0]]["quote"]; QDEC = SPECS[PAIRS[0]]["qdec"]  # USDso: same across pairs
+
+def ub():      return w.erc20_balance(QUOTE, QDEC)
+def bb(sp):    return w.erc20_balance(sp["base"], sp["bdec"])
+def sb():      return w.native_balance()
+def snap_lot(sp, q):
+    # FLOOR to lot so a sell never asks for more base than held (over-ask reverts).
+    n = math.floor(q / sp["lot"]); q = round(n * sp["lot"], 10)
+    return q if q >= sp["minq"] else round(sp["minq"], 10)
+def snap_price(sp, p, up=False):
+    # Directional snap so the IOC still crosses the touch: BUY limit rounds UP
+    # (stays >= ask), SELL limit rounds DOWN (stays <= bid).
+    t = sp["tick"]; n = math.ceil(p / t) if up else math.floor(p / t)
+    return round(n * t, 10)
+def poll_base(sp, target_cmp, want_above, timeout=3.0):
     t0 = time.time()
-    while time.time()-t0 < timeout:
-        v = bb()
+    while time.time() - t0 < timeout:
+        v = bb(sp)
         if (want_above and v >= target_cmp) or (not want_above and v <= target_cmp):
             return v
         time.sleep(0.2)
-    return bb()
+    return bb(sp)
 
 ERC20 = [
  {"name":"approve","type":"function","stateMutability":"nonpayable",
@@ -76,39 +130,71 @@ ERC20 = [
  {"name":"allowance","type":"function","stateMutability":"view",
   "inputs":[{"name":"o","type":"address"},{"name":"s","type":"address"}],"outputs":[{"name":"","type":"uint256"}]},
 ]
-def ensure_allowance(token, dec, need_human):
+VAULT_ABI = [
+ {"name":"getWithdrawableBalance","type":"function","stateMutability":"view",
+  "inputs":[{"name":"user","type":"address"},{"name":"token","type":"address"}],
+  "outputs":[{"name":"","type":"uint256"}]},
+]
+
+def vault_usdso():
+    """USDso sitting inside the pools — an unfilled BUY RESERVES quote there, so it
+    leaves the wallet without being spent. Counting only the wallet made a reserved
+    order look like a ~$100 loss and falsely tripped the bleed cap."""
+    tot = 0.0
+    for sp in SPECS.values():
+        try:
+            c = w.w3.eth.contract(address=sp["pool"], abi=VAULT_ABI)
+            tot += c.functions.getWithdrawableBalance(
+                w.address, Web3.to_checksum_address(sp["quote"])).call() / (10 ** sp["qdec"])
+        except Exception:
+            pass
+    return tot
+
+def usdso_total():
+    """True USDso capital: free in the wallet + reserved/withdrawable in the pools."""
+    return ub() + vault_usdso()
+def ensure_allowance(pool, token, dec, need_human):
     c = w.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20)
-    cur = c.functions.allowance(w.address, POOL).call()/(10**dec)
+    cur = c.functions.allowance(w.address, pool).call() / (10 ** dec)
     if cur >= need_human:
-        print(f"  allowance ok: {token[:10]} {cur:.2f} >= {need_human}"); return
-    raw = int(need_human*(10**dec))
-    tx = c.functions.approve(POOL, raw).build_transaction(
+        return
+    raw = int(need_human * (10 ** dec))
+    tx = c.functions.approve(pool, raw).build_transaction(
         {"from": w.address, "nonce": w.reserve_nonce(), **w._gas_fields()})
     h = w.sign_and_send(tx); w.wait_for_receipt(h)
-    print(f"  pre-approved {token[:10]} -> {need_human} (tx {h[:14]})")
+    print(f"  pre-approved {token[:10]} @ {pool[:10]} -> {need_human} (tx {h[:14]})")
 
-print(f"=== VOLUME CLIMB {PAIR} ===")
+print(f"=== VOLUME CLIMB (rotating) pairs={PAIRS} ===")
 print(f"target=${TARGET_VOLUME} leg=${LEG_USD} slip={SLIP_PCT*100}% "
       f"caps: gas<{MAX_GAS_SOMI} floor={SOMI_FLOOR} bleed<${MAX_USDSO_BLEED} iters<{MAX_ITERS}")
-u_start, b_start, s_start = ub(), bb(), sb()
-print(f"START USDso={u_start:.4f} base={b_start:.6f} SOMI={s_start:.4f}")
-if b_start > MINQ:
-    print(f"!! starting base {b_start} > min — NOT flat. ABORT."); raise SystemExit(1)
+u_start, s_start = usdso_total(), sb()
+print(f"START USDso={u_start:.4f} (wallet+reserved) SOMI={s_start:.4f}")
+for sp in SPECS.values():
+    if bb(sp) > sp["minq"]:
+        print(f"!! starting base for {sp['pair']} > min — NOT flat. ABORT."); raise SystemExit(1)
 
 if PREAPPROVE:
-    print("pre-approving (one-time, avoids per-leg approvals)...")
-    ensure_allowance(QUOTE, QDEC, TARGET_VOLUME)
-    ensure_allowance(BASE,  BDEC, TARGET_VOLUME/1000.0)
+    print("pre-approving each pool (one-time)...")
+    for sp in SPECS.values():
+        ensure_allowance(sp["pool"], sp["quote"], sp["qdec"], TARGET_VOLUME)
+        ensure_allowance(sp["pool"], sp["base"],  sp["bdec"], TARGET_VOLUME / 1000.0)
 
-vol = 0.0; trips = 0; consec_fail = 0
-# Cost-aware mode (week-2 capital efficiency): generate volume only while it's cheap.
-# SPREAD_GATE: skip a trip when the live spread is too wide. COST_CEIL: pause when the
-# rolling realized $/1k climbs over the ceiling. Both 0 = disabled (plain full burst).
+vol = 0.0; trips = 0; consec_fail = 0; _net_fails = 0
+_last_trade_ts = time.time()   # keepalive clock — reset on every successful trip
 from collections import deque
+# COST_CEIL_PER_1K is now a PRE-TRADE ceiling on the toll the live book implies
+# (effective spread x 5), not on the realized rolling mean. Measured over 54 trips:
+# implied toll had stdev 0.045 while realized had 0.234 — 5.2x the noise — because
+# realized also carries the price drift during the ~30-60s we hold inventory. Gating
+# on realized meant pausing at random rather than when trading was actually dear.
 COST_CEIL_PER_1K = float(os.environ.get("CLIMB_COST_CEIL_PER_1K", "0"))
 SPREAD_GATE_PCT  = float(os.environ.get("CLIMB_SPREAD_GATE_PCT", "0"))
 PAUSE_EXP_S      = float(os.environ.get("CLIMB_PAUSE_EXP_S", "30"))
-COST_WINDOW      = int(os.environ.get("CLIMB_COST_WINDOW", "15"))
+# Realized cost is demoted to a slow SAFETY BREAKER: a wide window, and it only
+# fires when realized runs far past what the book implied — i.e. something is
+# structurally wrong (bad fills, hidden slippage), not just noise.
+COST_WINDOW      = int(os.environ.get("CLIMB_COST_WINDOW", "50"))
+BREAKER_MULT     = float(os.environ.get("CLIMB_REALIZED_BREAKER_MULT", "2.0"))
 _costs = deque(maxlen=COST_WINDOW)
 try:
     _sob = dex.get_orderbook("SOMI:USDso")
@@ -117,9 +203,8 @@ except Exception:
     SOMI_PX = 0.10
 print(f"cost-aware: spread_gate={SPREAD_GATE_PCT}% cost_ceil=${COST_CEIL_PER_1K}/1k window={COST_WINDOW} somi_px={SOMI_PX:.4f}")
 
-# Telegram notifications via the agent's configured bot (milestones, pause, resume).
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", ""); TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
-TG_MS = float(os.environ.get("CLIMB_TG_MILESTONE", "25000"))  # ping every N volume
+TG_MS = float(os.environ.get("CLIMB_TG_MILESTONE", "25000"))
 def tg(msg):
     if not TG_TOKEN or not TG_CHAT: return
     try:
@@ -128,113 +213,279 @@ def tg(msg):
                       json={"chat_id": TG_CHAT, "text": msg}, timeout=10)
     except Exception: pass
 _paused = False; _last_ms = 0.0
-tg(f"🚀 Volume run: {PAIR} target ${TARGET_VOLUME:,.0f}, leg ${LEG_USD:.0f}, cost-ceil ${COST_CEIL_PER_1K}/1k")
+tg(f"🚀 Volume run: pairs {PAIRS} target ${TARGET_VOLUME:,.0f}, leg ${LEG_USD:.0f}, cost-ceil ${COST_CEIL_PER_1K}/1k")
 
-def stop(reason):
-    # auto-flatten: never exit holding a bag (e.g. a sell leg killed by a network
-    # blip). Sell any residual base back into the bid before reporting + exiting.
-    # Uses the same patient retry budget as the in-trip residual handler — a
-    # thin moment at the exact instant of stop() shouldn't leave a bag when the
-    # book would have refilled within a few more seconds.
-    b = bb()
-    if b > MINQ:
-        for attempt in range(max(3, RESID_RETRIES)):
+def flatten_all(max_attempts=None):
+    """Sell any residual base on every pair back to USDso (never exit with a bag).
+    max_attempts bounds the retries (the SIGTERM path uses a small budget to finish
+    inside docker's stop grace)."""
+    n = max_attempts if max_attempts else max(3, RESID_RETRIES)
+    for sp in SPECS.values():
+        b = bb(sp)
+        if b <= sp["minq"]:
+            continue
+        for attempt in range(n):
             try:
-                ob = dex.get_orderbook(PAIR)
+                ob = dex.get_orderbook(sp["pair"])
                 if not ob.get("bid"):
                     time.sleep(RESID_WAIT_S); continue
-                dex.place_order(PAIR, "sell", snap_lot(b), order_type="ioc",
-                                limit_price=round(ob["bid"]*(1-SLIP_PCT*(attempt+1)), 2), funding="wallet")
+                dex.place_order(sp["pair"], "sell", snap_lot(sp, b), order_type="ioc",
+                                limit_price=snap_price(sp, ob["bid"]*(1-SLIP_PCT*(attempt+1))), funding="wallet")
                 time.sleep(max(3, RESID_WAIT_S))
-                b = bb()
-                if b <= MINQ: break
+                b = bb(sp)
+                if b <= sp["minq"]: break
             except Exception as e:
-                print(f"  auto-flatten attempt {attempt} failed: {e}"); time.sleep(2)
-    u,b,s = ub(),bb(),sb()
+                print(f"  flatten {sp['pair']} attempt {attempt} failed: {e}"); time.sleep(2)
+
+def stop(reason):
+    flatten_all()
+    u, s = usdso_total(), sb()
     print(f"\n=== STOP: {reason} ===")
-    print(f"trips={trips} volume=${vol:.2f} USDso_bleed=${u_start-u:.4f} gas={s_start-s:.4f} SOMI residual_base={b:.6f}")
-    if b > MINQ: print(f"!! WARNING residual base {b:.6f} — auto-flatten did not clear it, flatten manually")
-    tg(f"🛑 Stopped: {reason} | vol ${vol:,.0f} | bleed ${u_start-u:.2f} | gas {s_start-s:.1f} SOMI | flat={'yes' if b<=MINQ else 'NO'}")
+    bags = {p: bb(sp) for p, sp in SPECS.items() if bb(sp) > sp["minq"]}
+    print(f"trips={trips} volume=${vol:.2f} USDso_bleed=${u_start-u:.4f} gas={s_start-s:.4f} SOMI residual={bags}")
+    if bags: print(f"!! WARNING residual base {bags} — flatten did not clear it, flatten manually")
+    tg(f"🛑 Stopped: {reason} | vol ${vol:,.0f} | bleed ${u_start-u:.2f} | gas {s_start-s:.1f} SOMI | flat={'yes' if not bags else 'NO'}")
     raise SystemExit(0)
+
+def _on_term(signum, frame):
+    # docker stop sends SIGTERM before SIGKILL — flatten (bounded) so an external
+    # stop mid-round-trip can't leave a bag. Kept small to fit the stop grace.
+    print(f"\n[signal {signum}] flatten-and-exit...")
+    try:
+        flatten_all(max_attempts=3)
+    except Exception as e:
+        print(f"  term-flatten err {e}")
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _on_term)
+
+def book_levels(pair, n=8):
+    """Top n levels each side: ([(price,qty)...bids], [(price,qty)...asks])."""
+    r = _rq.get(f"{config.DREAMDEX_HTTP}/v0/orderbooks", params={"symbols": pair}, timeout=6)
+    r.raise_for_status()
+    d = r.json()
+    if isinstance(d, dict) and d.get("orderbooks"):
+        b = d["orderbooks"][0]
+    elif isinstance(d, list) and d:
+        b = d[0]
+    else:
+        b = d
+    def side(k):
+        out = []
+        for L in (b.get(k) or [])[:n]:
+            if isinstance(L, dict):
+                out.append((float(L["price"]), float(L.get("quantity", L.get("size", 0)))))
+            else:
+                out.append((float(L[0]), float(L[1])))
+        return out
+    return side("bids"), side("asks")
+
+def _vwap(levels, need):
+    """Volume-weighted fill price for `need` base walking down the levels.
+    None when the visible book can't cover it."""
+    filled = cost = 0.0
+    for p, q in levels:
+        take = min(q, need - filled)
+        if take <= 0:
+            break
+        cost += take * p; filled += take
+        if filled >= need * 0.999:
+            return cost / filled
+    return None
+
+def eff_spread_pct(bids, asks, leg_usd):
+    """The spread we ACTUALLY pay for a leg of this size — buy VWAP vs sell VWAP.
+    Equals the quoted spread when top-of-book covers us; worse when we'd walk.
+    None = not enough visible depth (that pair would slip badly; skip it)."""
+    if not bids or not asks:
+        return None
+    mid = (bids[0][0] + asks[0][0]) / 2
+    if mid <= 0:
+        return None
+    need = leg_usd / mid
+    buy, sell = _vwap(asks, need), _vwap(bids, need)
+    if buy is None or sell is None:
+        return None
+    return (buy - sell) / mid * 100
+
+def pick_cheapest(leg_usd):
+    """Pick the pair with the lowest EFFECTIVE spread for a leg of `leg_usd` — i.e.
+    what we'd really pay after walking the book — not the top-of-book quote. A pair
+    whose visible depth can't absorb our order is skipped: WETH's touch often holds
+    less than an $80 leg, so its quoted spread understates the true cost by ~50%.
+
+    Returns (spec, ob, eff_pct, quoted_pct, within_gate); (None,...) if no pair
+    has a usable book. Falls back to top-of-book if the depth fetch fails."""
+    best = None
+    for sp in SPECS.values():
+        try:
+            bids, asks = book_levels(sp["pair"])
+            if not bids or not asks:
+                continue
+            ob = {"bid": bids[0][0], "ask": asks[0][0]}
+            mid = (ob["bid"] + ob["ask"]) / 2
+            quoted = (ob["ask"] - ob["bid"]) / mid * 100
+            eff = eff_spread_pct(bids, asks, leg_usd)
+            if eff is None:
+                print(f"  {sp['pair']}: visible book too thin for a ${leg_usd:.0f} leg — skip")
+                continue
+        except Exception:
+            # depth endpoint hiccup — fall back to top-of-book for this pair
+            try:
+                ob = dex.get_orderbook(sp["pair"])
+            except Exception:
+                continue
+            if not ob.get("bid") or not ob.get("ask"):
+                continue
+            mid = (ob["bid"] + ob["ask"]) / 2
+            quoted = eff = (ob["ask"] - ob["bid"]) / mid * 100
+        if best is None or eff < best[2]:
+            best = (sp, ob, eff, quoted)
+    if best is None:
+        return None, None, None, None, False
+    sp, ob, eff, quoted = best
+    # A round-trip crosses the effective spread once on a notional of `leg`, and
+    # books 2x leg of volume — so the toll per 1k of volume is eff% x 5.
+    implied_toll = eff * 5.0
+    within = True
+    if SPREAD_GATE_PCT > 0 and eff > SPREAD_GATE_PCT:
+        within = False
+    if COST_CEIL_PER_1K > 0 and implied_toll > COST_CEIL_PER_1K:
+        within = False
+    return sp, ob, eff, quoted, within
 
 for i in range(MAX_ITERS):
     try:
-        # cap checks inside try so a transient RPC/DNS blip is caught + retried, not fatal
         if vol >= TARGET_VOLUME: stop("target volume reached")
-        s_now, u_now = sb(), ub()
+
+        # Sweep stray bags FIRST, so the capital checks below measure a flat wallet.
+        # A prior trip's sell may have failed on a pair the rotation isn't currently
+        # picking, and base inventory hides value from the USDso reading.
+        bagged = [sp for sp in SPECS.values() if bb(sp) > sp["minq"]]
+        if bagged:
+            print(f"[{i}] stray bag on {[sp['pair'] for sp in bagged]} — flattening first")
+            flatten_all()
+            bagged = [sp for sp in SPECS.values() if bb(sp) > sp["minq"]]
+
+        s_now = sb()
+        u_now = usdso_total()   # wallet + reserved-in-pool, never wallet alone
         if s_start - s_now >= MAX_GAS_SOMI: stop("max gas hit")
         if s_now <= SOMI_FLOOR: stop("SOMI floor hit")
-        if u_start - u_now >= MAX_USDSO_BLEED: stop("max USDso bleed hit")
+        # Only trust the bleed reading when flat: base inventory we couldn't sell
+        # would otherwise read as a loss and stop a perfectly healthy run.
+        if bagged:
+            print(f"[{i}] holding {[sp['pair'] for sp in bagged]} — skipping bleed check this pass")
+        elif u_start - u_now >= MAX_USDSO_BLEED:
+            stop("max USDso bleed hit")
         if consec_fail >= MAX_CONSEC_FAIL: stop(f"{MAX_CONSEC_FAIL} consecutive failures")
-        if bb() > MINQ:
-            stop(f"unexpected base inventory at trip start {bb():.6f}")
-        ob = dex.get_orderbook(PAIR)
-        if not ob["bid"] or not ob["ask"]:
-            print(f"[{i}] empty book"); consec_fail += 1; time.sleep(PAUSE_S); continue
+
+        # Rank by the spread we'd ACTUALLY pay at our leg size, not the quote.
+        sp, ob, spread_pct, quoted_pct, within = pick_cheapest(LEG_USD)
+        if sp is None:
+            print(f"[{i}] no pair with a book deep enough for a ${LEG_USD:.0f} leg — pause {PAUSE_EXP_S:.0f}s")
+            time.sleep(PAUSE_EXP_S); continue
+
+        idle_s = time.time() - _last_trade_ts
+        force_keepalive = (not within) and idle_s > LIVENESS_S
+        if not within and not force_keepalive:
+            toll = spread_pct * 5.0
+            why = (f"toll ${toll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k"
+                   if (COST_CEIL_PER_1K > 0 and toll > COST_CEIL_PER_1K)
+                   else f"eff {spread_pct:.3f}% > gate {SPREAD_GATE_PCT}%")
+            if not _paused: tg(f"⏸ Paused @ ${vol:,.0f} vol — book too dear: {why}"); _paused = True
+            print(f"[{i}] book too dear on {sp['pair']}: eff {spread_pct:.3f}% -> toll ${toll:.3f}/1k ({why}) "
+                  f"— pause {PAUSE_EXP_S:.0f}s (idle {idle_s/3600:.1f}h)")
+            time.sleep(PAUSE_EXP_S); continue
+
+        leg_this = LEG_USD
+        if force_keepalive:
+            leg_this = KEEPALIVE_LEG
+            print(f"[{i}] KEEPALIVE: idle {idle_s/3600:.1f}h > {LIVENESS_S/3600:.0f}h — forcing ${leg_this:.0f} trip on {sp['pair']} @ {spread_pct:.3f}% (over gate, staying alive)")
+            tg(f"🫀 Keepalive @ ${vol:,.0f} vol — idle {idle_s/3600:.1f}h, forcing a small trade to dodge the 24h-idle DQ")
+
         mid = (ob["bid"]+ob["ask"])/2
-        spread_pct = (ob["ask"]-ob["bid"])/mid*100
-        if SPREAD_GATE_PCT > 0 and spread_pct > SPREAD_GATE_PCT:
-            if not _paused: tg(f"⏸ Paused @ ${vol:,.0f} vol — spread {spread_pct:.3f}% > {SPREAD_GATE_PCT}% (wide)"); _paused = True
-            print(f"[{i}] spread {spread_pct:.3f}% > gate {SPREAD_GATE_PCT}% — pause {PAUSE_EXP_S:.0f}s"); time.sleep(PAUSE_EXP_S); continue
-        qty = snap_lot(LEG_USD/mid)
-        buy_lim  = round(ob["ask"]*(1+SLIP_PCT), 2)
-        sell_lim = round(ob["bid"]*(1-SLIP_PCT), 2)
+        qty = snap_lot(sp, leg_this/mid)
+        buy_lim  = snap_price(sp, ob["ask"]*(1+SLIP_PCT), up=True)   # round UP so IOC crosses
+        sell_lim = snap_price(sp, ob["bid"]*(1-SLIP_PCT))            # round DOWN so IOC crosses
+        tag = sp["pair"].split(":")[0]
 
-        b_pre = bb()
-        rb = dex.place_order(PAIR,"buy",qty,order_type="ioc",limit_price=buy_lim,funding="wallet")
+        b_pre = bb(sp)
+        rb = dex.place_order(sp["pair"],"buy",qty,order_type="ioc",limit_price=buy_lim,funding="wallet")
         if rb.get("status") != "success":
-            print(f"[{i}] BUY {rb.get('status')}"); consec_fail += 1; time.sleep(PAUSE_S); continue
-        got = poll_base(b_pre + MINQ*0.5, want_above=True) - b_pre
-        if got < MINQ*0.5:
-            print(f"[{i}] BUY success but no base delta after poll — STOP to be safe"); stop("buy/settle desync")
+            print(f"[{i}] {tag} BUY {rb.get('status')}"); consec_fail += 1; time.sleep(PAUSE_S); continue
+        got = poll_base(sp, b_pre + sp["minq"]*0.5, want_above=True) - b_pre
+        if got < sp["minq"]*0.5:
+            print(f"[{i}] {tag} BUY ok but no base delta — STOP to be safe"); stop("buy/settle desync")
 
-        rs = dex.place_order(PAIR,"sell",snap_lot(got),order_type="ioc",limit_price=sell_lim,funding="wallet")
-        resid = poll_base(MINQ, want_above=False)
-        if resid > MINQ:
-            rs2 = dex.place_order(PAIR,"sell",snap_lot(resid),order_type="ioc",limit_price=round(ob["bid"]*(1-SLIP_PCT*3),2),funding="wallet")
-            resid = poll_base(MINQ, want_above=False)
-        if resid > MINQ:
-            # Thin bid: don't hard-stop on a momentary lack of depth. Pause, let the
-            # book refill, and retry the residual with widening slippage. Only give
-            # up (stop with a bag) after RESID_RETRIES patient attempts.
+        # Sell the FULL held balance, not just this trip's delta — folds in any
+        # sub-min-qty dust left by fee-shave on prior trips (which no standalone
+        # order can clear) so it doesn't accumulate into a trapped bag.
+        dex.place_order(sp["pair"],"sell",snap_lot(sp, bb(sp)),order_type="ioc",limit_price=sell_lim,funding="wallet")
+        resid = poll_base(sp, sp["minq"], want_above=False)
+        if resid > sp["minq"]:
+            dex.place_order(sp["pair"],"sell",snap_lot(sp, resid),order_type="ioc",
+                            limit_price=snap_price(sp, ob["bid"]*(1-SLIP_PCT*3)),funding="wallet")
+            resid = poll_base(sp, sp["minq"], want_above=False)
+        if resid > sp["minq"]:
             if not _paused:
-                tg(f"⏸ Paused @ ${vol:,.0f} vol — thin book, retrying sell of {resid:.4f} {PAIR.split(':')[0]}"); _paused = True
-            print(f"[{i}] residual {resid:.6f} — thin book, patient-retry up to {RESID_RETRIES}x")
+                tg(f"⏸ Paused @ ${vol:,.0f} vol — thin {tag} book, retrying sell of {resid:.6f}"); _paused = True
+            print(f"[{i}] {tag} residual {resid:.6f} — thin book, patient-retry up to {RESID_RETRIES}x")
             for r in range(RESID_RETRIES):
                 time.sleep(RESID_WAIT_S)
                 try:
-                    ob2 = dex.get_orderbook(PAIR)
+                    ob2 = dex.get_orderbook(sp["pair"])
                     if not ob2.get("bid"): continue
-                    dex.place_order(PAIR,"sell",snap_lot(resid),order_type="ioc",
-                                    limit_price=round(ob2["bid"]*(1-SLIP_PCT*(2+r)),2),funding="wallet")
+                    dex.place_order(sp["pair"],"sell",snap_lot(sp, resid),order_type="ioc",
+                                    limit_price=snap_price(sp, ob2["bid"]*(1-SLIP_PCT*(2+r))),funding="wallet")
                 except Exception as e:
-                    print(f"[{i}] resid-sell retry {r} err {str(e)[:80]}")
-                resid = poll_base(MINQ, want_above=False)
-                if resid <= MINQ:
-                    print(f"[{i}] residual cleared after {r+1} retr{'y' if r==0 else 'ies'}"); break
-            if resid > MINQ:
-                stop(f"SELL failed after {RESID_RETRIES} patient retries — residual {resid:.6f} (bag)")
+                    print(f"[{i}] {tag} resid-sell retry {r} err {str(e)[:80]}")
+                resid = poll_base(sp, sp["minq"], want_above=False)
+                if resid <= sp["minq"]:
+                    print(f"[{i}] {tag} residual cleared after {r+1}"); break
+            if resid > sp["minq"]:
+                stop(f"SELL failed after {RESID_RETRIES} retries on {tag} — residual {resid:.6f} (bag)")
 
         vt = got*mid*2
-        vol += vt; trips += 1; consec_fail = 0
-        u,s = ub(), sb()
+        vol += vt; trips += 1; consec_fail = 0; _last_trade_ts = time.time()
+        if _net_fails:
+            print(f"[{i}] network recovered after {_net_fails} failed attempt(s)")
+            tg(f"🌐 Network back @ ${vol:,.0f} vol — trading resumed"); _net_fails = 0
+        u, s = usdso_total(), sb()
         cost_1k = ((u_now-u) + (s_now-s)*SOMI_PX)/vt*1000 if vt > 0 else 0.0
         _costs.append(cost_1k); roll = sum(_costs)/len(_costs)
-        print(f"[{i}] trip {trips}: vol+=${vt:.2f} tot=${vol:.2f} USDso={u:.4f}(bleed ${u_start-u:.4f}) SOMI={s:.4f} | cost ${cost_1k:.3f}/1k roll ${roll:.3f}/1k")
-        if _paused and (COST_CEIL_PER_1K <= 0 or roll <= COST_CEIL_PER_1K):
-            tg(f"▶️ Resumed @ ${vol:,.0f} vol — cost back to ${roll:.3f}/1k (under ceil)"); _paused = False
+        impact = spread_pct - quoted_pct
+        implied = spread_pct * 5.0
+        print(f"[{i}] trip {trips} {tag} @eff {spread_pct:.3f}% (quoted {quoted_pct:.3f}%, impact {impact:+.3f}%): "
+              f"vol+=${vt:.2f} tot=${vol:.2f} USDso={u:.4f}(bleed ${u_start-u:.4f}) SOMI={s:.4f} "
+              f"| implied ${implied:.3f}/1k cost ${cost_1k:.3f}/1k roll ${roll:.3f}/1k")
+        if _paused:
+            tg(f"▶️ Resumed @ ${vol:,.0f} vol — book cheap again"); _paused = False
         if vol >= _last_ms + TG_MS:
             _last_ms = vol; tg(f"📊 +${vol:,.0f} vol | roll ${roll:.3f}/1k | USDso ${u:.0f} | gas {s_start-s:.1f} SOMI")
-        if COST_CEIL_PER_1K > 0 and len(_costs) >= max(3, COST_WINDOW//2) and roll > COST_CEIL_PER_1K:
-            if not _paused: tg(f"⏸ Paused @ ${vol:,.0f} vol — cost ${roll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k"); _paused = True
-            print(f"[{i}] rolling cost ${roll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k — PAUSE {PAUSE_EXP_S:.0f}s"); time.sleep(PAUSE_EXP_S)
+        # SAFETY BREAKER (not the throttle): only when realized cost runs far past
+        # the book over a FULL wide window does something structural look wrong.
+        breaker = COST_CEIL_PER_1K * BREAKER_MULT
+        if COST_CEIL_PER_1K > 0 and len(_costs) >= COST_WINDOW and roll > breaker:
+            tg(f"🚨 Realized ${roll:.3f}/1k > {BREAKER_MULT:g}x ceil (${breaker:.3f}) over {COST_WINDOW} trips — pausing to reassess")
+            print(f"[{i}] BREAKER: realized ${roll:.3f}/1k > {BREAKER_MULT:g}x ceil ${breaker:.3f}/1k over "
+                  f"{COST_WINDOW} trips — book implied far less; pausing {PAUSE_EXP_S*4:.0f}s")
+            _costs.clear(); time.sleep(PAUSE_EXP_S * 4)
         time.sleep(PAUSE_S)
     except SystemExit:
         raise
     except Exception as e:
-        print(f"[{i}] EXC {str(e)[:120]}"); consec_fail += 1
         try: w.reset_nonce()
         except Exception: pass
+        if _is_network_err(e):
+            # Transient: host/DNS/RPC outage. Do NOT count toward the trade breaker
+            # and do NOT halt — back off (up to 15 min) and retry until it returns.
+            _net_fails += 1
+            wait = NET_BACKOFF_S[min(_net_fails - 1, len(NET_BACKOFF_S) - 1)]
+            print(f"[{i}] NETWORK error #{_net_fails} ({str(e)[:70]}) — retry in {wait}s (not a trade failure)")
+            if _net_fails == 1:
+                tg(f"🌐 Network down @ ${vol:,.0f} vol — backing off, will retry (engine stays alive)")
+            time.sleep(wait)
+            continue
+        print(f"[{i}] EXC {str(e)[:120]}"); consec_fail += 1
         time.sleep(2)
 
 stop("max iters reached")

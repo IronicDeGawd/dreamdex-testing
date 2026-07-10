@@ -41,7 +41,7 @@ AGENT_FUNDING_SOURCE = os.environ.get("AGENT_FUNDING_SOURCE", "wallet")  # "vaul
 # ── Timing ────────────────────────────────────────────────
 AGENT_LOOP_SECONDS = int(os.environ.get("AGENT_LOOP_SECONDS", 300))
 PRICE_POLL_SECONDS = 30
-LEADERBOARD_POLL   = 300
+LEADERBOARD_POLL   = int(os.environ.get("LEADERBOARD_POLL", 120))  # dashboard rank/volume freshness
 PRICE_HISTORY_LEN  = 12
 
 # ── OpenAI (R2 legacy — used only by archived agent/brain.py) ─────────────
@@ -131,9 +131,10 @@ FLASK_API_KEY = os.environ.get("FLASK_API_KEY", "")
 # The competition leaderboard lives on mainnet regardless of which network
 # the bot is currently trading on. We pin both the URL and the address that's
 # looked up so testnet runs still surface our mainnet standing.
-# R3 uses a new leaderboard + a fresh registered wallet (rules require zero-TX wallet).
-LEADERBOARD_URL     = os.environ.get("LEADERBOARD_URL", "https://dreamdex-leaderboard-new.vercel.app/api/leaderboard")
-LEADERBOARD_ADDRESS = os.environ.get("WALLET_ADDRESS", "0xD84fE2a2220f0269e3d88dab908ADceb2d691E76")  # R3 wallet
+# Each round uses a new leaderboard + a fresh registered wallet (rules require a
+# zero-TX wallet). R4 = "-total" board + wallet 0x703e...22F6. Override via env.
+LEADERBOARD_URL     = os.environ.get("LEADERBOARD_URL", "https://dreamdex-leaderboard-total.vercel.app/api/leaderboard")
+LEADERBOARD_ADDRESS = os.environ.get("WALLET_ADDRESS", "0x703e10344158d7C6CB943596328211a0a22422F6")  # R4 wallet
 
 # ═══════════════════════════════════════════════════════════
 # NETWORK-SPECIFIC CONFIG
@@ -153,8 +154,8 @@ if ENV == "mainnet":
     DREAMDEX_HTTP = "https://api.dreamdex.io"
     DREAMDEX_WS   = "wss://api.dreamdex.io/v0/ws/public"
 
-    # R3 fresh wallet (zero-TX, registered). Override via WALLET_ADDRESS if rotated.
-    MY_ADDRESS  = os.environ.get("WALLET_ADDRESS", "0xD84fE2a2220f0269e3d88dab908ADceb2d691E76")
+    # R4 fresh wallet (zero-TX, registered). Override via WALLET_ADDRESS if rotated.
+    MY_ADDRESS  = os.environ.get("WALLET_ADDRESS", "0x703e10344158d7C6CB943596328211a0a22422F6")
     PRIVATE_KEY = os.environ.get("MAINNET_PRIVATE_KEY", "")    # export MAINNET_PRIVATE_KEY=0x...
 
     MARKETS = {
