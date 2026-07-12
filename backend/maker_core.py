@@ -54,6 +54,12 @@ def desired_quotes(m: dict) -> dict:
       leg_usd, cap_usd, quote_avail      — sizing + budget
       margin_ticks                       — min profit per round-trip, in ticks
       allow_buy                          — trend / cooldown gate (caller decides)
+      inv_floor_base                     — standing inventory NEVER quoted for
+                                           sale (Arena fair-play: a position that
+                                           oscillates in a band above a floor is
+                                           real trading; one that flushes to zero
+                                           every cycle pattern-matches the
+                                           "near-flat cycle" wash-trade flag)
     """
     bid, ask, tick = m["bid"], m["ask"], m["tick"]
     lot, minq = m.get("lot") or 0.0, m.get("minq") or 0.0
@@ -61,6 +67,7 @@ def desired_quotes(m: dict) -> dict:
     leg, cap = m["leg_usd"], m["cap_usd"]
     avail = m.get("quote_avail") or 0.0
     margin = m.get("margin_ticks", 1)
+    floor_inv = m.get("inv_floor_base") or 0.0
     out: dict = {}
     if not bid or not ask or bid <= 0 or ask <= bid or not tick:
         return out           # unusable book: quote nothing
@@ -75,14 +82,15 @@ def desired_quotes(m: dict) -> dict:
             if qty > 0 and qty * px <= avail + 1e-9:
                 out["buy"] = (px, qty)
 
-    # SELL — reduce inventory, never below cost + margin (the no-bleed rule)
-    if inv >= minq and inv > 0:
-        floor = (avg + margin * tick) if avg > 0 else ask
-        px = snap_up(max(ask, floor), tick)     # snap UP: rounding can't shave the floor
+    # SELL — reduce inventory ABOVE the standing floor, never below cost + margin
+    sellable = inv - floor_inv
+    if sellable >= minq and sellable > 0:
+        px_floor = (avg + margin * tick) if avg > 0 else ask
+        px = snap_up(max(ask, px_floor), tick)  # snap UP: rounding can't shave the floor
         if px <= bid:                           # keep it a maker order
             px = snap_up(bid + tick, tick)
-        if px >= floor - 1e-12:                 # guard held by construction; belt+braces
-            qty = round_lot(min(inv, leg / px), lot, minq)
+        if px >= px_floor - 1e-12:              # guard held by construction; belt+braces
+            qty = round_lot(min(sellable, leg / px), lot, minq)
             if qty > 0:
                 out["sell"] = (px, qty)
     return out
