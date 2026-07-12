@@ -391,6 +391,9 @@ class DreamDEX:
                      "outputs": [{"name": "", "type": "bool"}]},
                     {"name": "decimals", "type": "function", "stateMutability": "view",
                      "inputs": [], "outputs": [{"name": "", "type": "uint8"}]},
+                    {"name": "allowance", "type": "function", "stateMutability": "view",
+                     "inputs": [{"name": "owner", "type": "address"}, {"name": "spender", "type": "address"}],
+                     "outputs": [{"name": "", "type": "uint256"}]},
                 ]
                 token_contract = self.wallet.w3.eth.contract(address=token_addr_checksum, abi=erc20_abi)
                 # Prefer the on-chain decimals(); fall back to MARKETS metadata
@@ -435,19 +438,32 @@ class DreamDEX:
                 from config import MARKETS
                 pool_addr = Web3.to_checksum_address(MARKETS[symbol]["contract"])
 
-                tx = token_contract.functions.approve(pool_addr, raw_amount).build_transaction({
-                    "from":  self.wallet.address,
-                    "nonce": self.wallet.reserve_nonce(),
-                    **self.wallet._gas_fields(),
-                })
-                from eth_account import Account
-                try:
-                    a_hash = self.wallet.sign_and_send(tx)
-                except Exception:
-                    self.wallet.reset_nonce()
-                    raise
-                self.wallet.wait_for_receipt(a_hash)
-                print(f"[DreamDEX] Approve confirmed: {a_hash}")
+                # The order pulls worst-case collateral at the LIMIT price, so an
+                # approve sized to the API's mid-notional can fall a hair short and
+                # revert (ERC20InsufficientAllowance). Two guards:
+                #  1) Never overwrite an already-sufficient allowance with a smaller
+                #     one — otherwise the big one-time startup pre-approve gets ground
+                #     down to the per-order size and ping-pongs at the edge every trip.
+                #  2) When we do approve, cover the order's worst case (raw_cap already
+                #     carries a 2x margin), never just the thin API amount.
+                need_raw = raw_cap if cap_human > 0 else raw_amount
+                approve_raw = max(raw_amount, need_raw)
+                current_allow = token_contract.functions.allowance(self.wallet.address, pool_addr).call()
+                if current_allow >= need_raw:
+                    print(f"[DreamDEX] allowance {current_allow} already covers {need_raw}; skipping approve")
+                else:
+                    tx = token_contract.functions.approve(pool_addr, approve_raw).build_transaction({
+                        "from":  self.wallet.address,
+                        "nonce": self.wallet.reserve_nonce(),
+                        **self.wallet._gas_fields(),
+                    })
+                    try:
+                        a_hash = self.wallet.sign_and_send(tx)
+                    except Exception:
+                        self.wallet.reset_nonce()
+                        raise
+                    self.wallet.wait_for_receipt(a_hash)
+                    print(f"[DreamDEX] Approve confirmed ({approve_raw}): {a_hash}")
 
             # Pre-flight eth_call simulation. Docs (dreamdex-contracts.md:183):
             # "Simulate first via eth_call. If success == false, do not broadcast."
