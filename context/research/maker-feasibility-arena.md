@@ -54,9 +54,13 @@ Reading the table:
   ($8.00 volume at zero spread cost)**; engine re-quoted the cap-limited buy and
   a sell at 1818.26–1818.51 — always ≥ avg + margin (no-bleed floor held live);
   drift re-quotes followed the ask upward (capturing more when offered).
-- Cut short deliberately on the self-cross realization (above). Final capital
-  accounting: see the run log `/tmp/maker_v2_smoke.log` on the server — bleed
-  bounded by the $0.75 hard guard either way.
+- Cut short deliberately on the self-cross risk (above). **Post-hoc check: the
+  R4 engine log shows ZERO WETH trips during the smoke window (1 WETH trip in
+  its whole 11h log) — the fill was genuine third-party flow, no self-cross
+  occurred.** A real counterparty hit our bid within ~5 min of quoting.
+- **Final accounting: $16.00 maker volume, total bleed +$0.0024 INCLUDING
+  0.0432 SOMI gas** — the exit flatten confirmed on-chain (sold 0.0044 WETH for
+  $8.0013 vs the $8.0000 buy). Wallet ended flat, verified.
 - Clean SIGTERM shutdown (cancel-all + IOC flatten) verified twice.
 
 ## Fees & yield
