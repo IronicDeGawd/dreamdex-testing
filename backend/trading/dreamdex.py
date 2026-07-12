@@ -127,9 +127,12 @@ class DreamDEX:
         # Domain must match the API server's registered domain (tested empirically)
         domain = urlparse(self.base_url).netloc  # e.g. stg.api.dreamdex.io or api.dreamdex.io
         now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # The address in the SIWE message MUST be the wallet that signs it —
+        # self.wallet may be an override (second wallet), while MY_ADDRESS is
+        # the config default. Mixing them = guaranteed invalid_signature.
         siwe_msg = (
             f"{domain} wants you to sign in with your Ethereum account:\n"
-            f"{MY_ADDRESS}\n\n"
+            f"{self.wallet.address}\n\n"
             f"Sign in to dreamDEX\n\n"
             f"URI: {self.base_url}\n"
             f"Version: 1\n"
