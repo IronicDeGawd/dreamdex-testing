@@ -113,23 +113,32 @@ class SomniaWallet:
         return {"gasPrice": self.w3.eth.gas_price}
 
     # ── Send a pre-built unsigned tx dict returned by DreamDEX API ────
+    def order_gas_limit(self, tx: dict, min_gas: int = 0) -> int:
+        """Gas limit for an order / cancel tx, shared by the broadcast path and
+        the eth_call sim so the sim can never pass a limit the broadcast would
+        fail. The 5M floor clears the pool's InsufficientGasForPayout guard
+        (0x782b2567): a taker IOC that sweeps depth spends ~1.7M reaching the
+        payout check, and the guard then needs several M more of headroom —
+        3M is not enough (DreamDEX docs §7a). gasUsed stays low (~1.7M), so the
+        higher limit does not raise cost; it only has to pass the guard."""
+        api_gas = int(tx.get("gasLimit", 300_000))
+        floor = max(5_000_000, int(min_gas or tx.get("min_gas", 0)))
+        return max(floor, int(api_gas * 2))
+
     def send_unsigned_tx(self, tx: dict, min_gas: int = 0) -> str:
         """
         Sign and broadcast a tx dict like:
           { "to": "0x...", "data": "0x...", "value": "0", "gasLimit": "250000" }
         Returns tx hash string.
 
-        `min_gas` (or tx["min_gas"]) raises the gas floor for calls that need
-        more headroom than the 3M default — notably native SOMI buys, which
-        revert with InsufficientGasForPayout below ~5M (DreamDEX docs §7a).
+        `min_gas` (or tx["min_gas"]) raises the gas floor further for calls that
+        need even more headroom than the 5M order default.
 
         R2: auto-recovers from `nonce too low` once by re-syncing from chain.
         That happens when another process (docker exec, manual REPL) consumed
         nonces in parallel with the long-lived server wallet.
         """
-        api_gas = int(tx.get("gasLimit", 300_000))
-        floor = max(3_000_000, int(min_gas or tx.get("min_gas", 0)))
-        gas = max(floor, int(api_gas * 2))
+        gas = self.order_gas_limit(tx, min_gas)
 
         def _build_and_send(n: int) -> str:
             tx_fields = {
