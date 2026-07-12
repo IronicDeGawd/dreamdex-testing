@@ -253,12 +253,17 @@ class DreamDEX:
                 print(f"[DreamDEX] orderbook {path} err: {e}")
         return out
 
-    # ── Order simulation (eth_call, no gas) ───────────────────────────
+    # ── Order simulation (eth_call at the broadcast gas limit) ────────
 
-    def simulate_order_tx(self, tx: dict) -> tuple[bool, int, str]:
+    def simulate_order_tx(self, tx: dict, min_gas: int = 0) -> tuple[bool, int, str]:
         """Replay the prepared tx via eth_call before broadcasting.
         Docs (dreamdex-contracts.md): if returned success==false, do not
-        broadcast. Returns (success, orderId, raw_hex)."""
+        broadcast. Returns (success, orderId, raw_hex).
+
+        The eth_call runs with the SAME gas limit we will broadcast, so the
+        InsufficientGasForPayout guard (0x782b2567) shows up in the sim instead
+        of only on-chain — otherwise the node's ~50M default makes the sim pass
+        a limit the real 5M tx would fail on a deep sweep (DreamDEX docs §7a)."""
         from web3 import Web3
         try:
             call_obj = {
@@ -266,6 +271,7 @@ class DreamDEX:
                 "from":  Web3.to_checksum_address(self.wallet.address),
                 "data":  tx.get("data", "0x"),
                 "value": int(tx.get("value", 0)),
+                "gas":   self.wallet.order_gas_limit(tx, min_gas),
             }
             raw = self.wallet.w3.eth.call(call_obj)
             raw_hex = raw.hex() if hasattr(raw, "hex") else str(raw)
@@ -450,7 +456,7 @@ class DreamDEX:
             if skip_sim:
                 print("[DreamDEX] sim skipped (skip_sim=True) — broadcasting direct")
             else:
-                sim_ok, sim_id, sim_raw = self.simulate_order_tx(resp)
+                sim_ok, sim_id, sim_raw = self.simulate_order_tx(resp, min_gas=gas_min)
                 print(f"[DreamDEX] eth_call sim: success={sim_ok} orderId={sim_id} raw={sim_raw[:80]}")
                 if not sim_ok:
                     return {"status": "would_revert", "sim_raw": sim_raw[:200]}
