@@ -102,6 +102,19 @@ def test_dust_inventory_not_quoted():
     assert "sell" not in desired_quotes(m)
 
 
+def test_inventory_floor_never_quoted_for_sale():
+    """Arena fair-play: the standing floor is held, only the band above it sells."""
+    m = base(inv_base=0.0004, avg_cost=118_000.0, inv_floor_base=0.00025)
+    q = desired_quotes(m)
+    assert q["sell"][1] <= 0.00015 + 1e-12          # only the excess over the floor
+    # inventory at/below the floor → no sell at all
+    m2 = base(inv_base=0.00014, avg_cost=118_000.0, inv_floor_base=0.00015)
+    assert "sell" not in desired_quotes(m2)
+    # floor of 0 (or absent) = the old full-unwind behavior
+    m3 = base(inv_base=0.0002, avg_cost=118_000.0, inv_floor_base=0.0)
+    assert desired_quotes(m3)["sell"][1] <= 0.0002 + 1e-12
+
+
 # ── requote dead-band ──────────────────────────────────────────────────────
 def test_requote_only_past_drift():
     assert not should_requote(118_000.0, 118_000.2, 0.1, 3)   # 2 ticks < 3

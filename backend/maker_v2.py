@@ -26,6 +26,7 @@ touching the main engine's nonce stream.
 """
 import json
 import os
+import random
 import signal
 import time
 
@@ -53,6 +54,12 @@ RESERVE_USD = float(os.environ.get("MAKER2_RESERVE_USD", "2"))
 SOMI_FLOOR  = float(os.environ.get("MAKER2_SOMI_FLOOR", "0.05"))
 MAX_S       = float(os.environ.get("MAKER2_MAX_S", "0"))            # 0 = run forever
 STATE_FILE  = os.environ.get("MAKER2_STATE_FILE", "data/maker_v2_state.json")
+# Arena fair-play shaping: hold a standing inventory floor (a position that
+# oscillates in a band above a floor is real trading; flushing to ~zero every
+# cycle pattern-matches the "near-flat cycle" wash-trade flag), and jitter the
+# leg so buy and sell sizes never mirror each other.
+INV_FLOOR_PCT = float(os.environ.get("MAKER2_INV_FLOOR_PCT", "0.3"))   # of cap
+LEG_JITTER    = float(os.environ.get("MAKER2_LEG_JITTER_PCT", "0.15"))
 
 dex = DreamDEX(private_key=os.environ.get("MAKER2_PRIVATE_KEY") or None,
                address=os.environ.get("MAKER2_ADDRESS") or None)
@@ -365,10 +372,12 @@ while True:
 
             allow_buy = trend_gate(p) and time.time() >= REENTER[p]
             free = max(0.0, wallet_usdso() - RESERVE_USD)
+            leg_j = LEG_USD * (1 + random.uniform(-LEG_JITTER, LEG_JITTER))
             want = desired_quotes({**snap, "tick": sp["tick"], "lot": sp["lot"], "minq": sp["minq"],
                                    "inv_base": POS[p]["qty"], "avg_cost": POS[p]["avg"],
-                                   "leg_usd": LEG_USD, "cap_usd": CAP_USD, "quote_avail": free,
-                                   "margin_ticks": MARGIN_T, "allow_buy": allow_buy})
+                                   "leg_usd": leg_j, "cap_usd": CAP_USD, "quote_avail": free,
+                                   "margin_ticks": MARGIN_T, "allow_buy": allow_buy,
+                                   "inv_floor_base": INV_FLOOR_PCT * CAP_USD / snap["mid"]})
             for side in ("buy", "sell"):
                 cur, tgt = ORDERS[p][side], want.get(side)
                 if tgt is None:
