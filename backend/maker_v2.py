@@ -34,7 +34,7 @@ import config
 from web3 import Web3
 from trading.dreamdex import DreamDEX
 from maker_core import (apply_fill, desired_quotes, round_lot, should_requote,
-                        snap_down, stop_loss_action, trend_mode)
+                        snap_down, snap_up, stop_loss_action, trend_mode)
 
 # ── config (env) ───────────────────────────────────────────────────────────
 PAIRS_ENV   = os.environ.get("MAKER2_PAIRS", "WBTC:USDso,WETH:USDso")
@@ -53,6 +53,14 @@ MAX_BLEED   = float(os.environ.get("MAKER2_MAX_BLEED", "2.0"))      # TRUE capit
 RESERVE_USD = float(os.environ.get("MAKER2_RESERVE_USD", "2"))
 SOMI_FLOOR  = float(os.environ.get("MAKER2_SOMI_FLOOR", "0.05"))
 MAX_S       = float(os.environ.get("MAKER2_MAX_S", "0"))            # 0 = run forever
+TARGET_VOL  = float(os.environ.get("MAKER2_TARGET_VOLUME", "0"))    # 0 = no volume stop
+# Idle-DQ keepalive (R4 rule 11: >24h without a trade = DQ). Maker fills are
+# flow-dependent and can be sparse; the host-side keepalive cron deliberately
+# no-ops while an engine is running — so the maker covers itself: if no fill
+# for MAKER2_LIVENESS_S, place ONE tiny IOC buy (a real trade that resets the
+# clock); the resting ask then sells it back as normal inventory. 0 = off.
+LIVENESS_S  = float(os.environ.get("MAKER2_LIVENESS_S", str(18 * 3600)))
+KEEPALIVE_USD = float(os.environ.get("MAKER2_KEEPALIVE_USD", "5"))
 STATE_FILE  = os.environ.get("MAKER2_STATE_FILE", "data/maker_v2_state.json")
 # Arena fair-play shaping: hold a standing inventory floor (a position that
 # oscillates in a band above a floor is real trading; flushing to ~zero every
@@ -137,6 +145,7 @@ ORDERS = {p: {"buy": None, "sell": None} for p in SPECS}    # resting: {id,price
 REENTER = {p: 0.0 for p in SPECS}                           # stop-loss cooldowns
 TREND = {p: {"mode": "neutral", "ts": 0.0, "pct": None} for p in SPECS}
 vol = 0.0; fills = 0; realized = 0.0
+last_fill_ts = time.time()   # liveness clock — reset by every recorded fill
 
 def load_state():
     try:
@@ -175,11 +184,11 @@ def cancel_all(pair):
     ORDERS[pair] = {"buy": None, "sell": None}
 
 def record_fill(pair, side, px, qty):
-    global vol, fills, realized
+    global vol, fills, realized, last_fill_ts
     if qty <= 0:
         return
     delta = apply_fill(POS[pair], side, px, qty)
-    realized += delta; vol += px * qty; fills += 1
+    realized += delta; vol += px * qty; fills += 1; last_fill_ts = time.time()
     print(f"FILL {side.upper()} {pair} {qty:.6f}@{px:g} vol+=${px*qty:.2f} tot=${vol:.2f} "
           f"realized={realized:+.4f} inv={POS[pair]['qty']:.6f}@{POS[pair]['avg']:g}", flush=True)
     save_state()
@@ -343,8 +352,32 @@ while True:
     try:
         if MAX_S and time.time() - T_START > MAX_S:
             stop("max runtime reached")
+        if TARGET_VOL and vol >= TARGET_VOL:
+            stop("target volume reached")
         if w.native_balance() <= SOMI_FLOOR:
             stop("SOMI gas floor hit")
+
+        # Liveness: one tiny IOC buy if no fill for LIVENESS_S — a real trade
+        # that resets the 24h-idle DQ clock; the maker's ask sells it back.
+        if LIVENESS_S and time.time() - last_fill_ts > LIVENESS_S:
+            for p0, sp0 in SPECS.items():
+                snap0 = book(sp0)
+                if not snap0:
+                    continue
+                q0 = round_lot(max(KEEPALIVE_USD, sp0["minq"] * snap0["mid"] * 1.05) / snap0["mid"],
+                               sp0["lot"], sp0["minq"])
+                if q0 <= 0:
+                    continue
+                px0 = snap_up(snap0["ask"] * 1.003, sp0["tick"])
+                print(f"  [{p0}] KEEPALIVE: idle {(time.time()-last_fill_ts)/3600:.1f}h — tiny IOC buy {q0:g}")
+                try:
+                    res0 = dex.place_order(p0, "buy", q0, order_type="ioc",
+                                           limit_price=px0, funding="wallet", skip_sim=True)
+                    if res0.get("status") == "success":
+                        record_fill(p0, "buy", px0, q0)
+                except Exception as e:
+                    print(f"  [{p0}] keepalive err {str(e)[:70]}")
+                break
 
         mids = {}
         for p, sp in SPECS.items():

@@ -40,7 +40,7 @@ _VOL_RE  = re.compile(r"tot=\$([0-9]+(?:\.[0-9]+)?)")
 # Steady engine also prints a rolling cost `roll $<num>/1k`.
 _ROLL_RE = re.compile(r"roll \$([0-9]+(?:\.[0-9]+)?)/1k")
 
-MODES = ("steady", "fast")
+MODES = ("steady", "fast", "maker")
 
 
 class EngineError(Exception):
@@ -140,11 +140,29 @@ class EngineManager:
             "DP_MAX_NOFILL":       "6",
         }
 
+    def _maker_env(self, p: dict) -> dict:
+        # Two-sided PostOnly maker (maker_v2.py). target=0 means run until
+        # stopped; inv_floor=0 unwinds fully (R4-friendly — its scoring counts
+        # free USDso), 0.3 is the Arena fair-play default.
+        return {
+            "MAKER2_PAIRS":          str(p.get("pair", "WETH:USDso")),
+            "MAKER2_TARGET_VOLUME":  str(p.get("target", 0)),
+            "MAKER2_LEG_USD":        str(p["leg"]),
+            "MAKER2_MAX_INV_USD":    str(p.get("cap", 40)),
+            "MAKER2_MAX_BLEED":      str(p.get("bleed_cap", 3)),
+            "MAKER2_INV_FLOOR_PCT":  str(p.get("inv_floor", 0.0)),
+            "MAKER2_RESERVE_USD":    "2",
+            "MAKER2_SOMI_FLOOR":     "3",
+        }
+
     def _build_command(self, mode: str, params: dict):
         """Returns (argv, engine_env) for the chosen mode."""
         if mode == "steady":
             engine_env = self._steady_env(params)
             script = "volume_climb.py"
+        elif mode == "maker":
+            engine_env = self._maker_env(params)
+            script = "maker_v2.py"
         else:
             engine_env = self._fast_env(params)
             script = "direct_burst.py"
