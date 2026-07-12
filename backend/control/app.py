@@ -80,6 +80,11 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR  = BACKEND_DIR / "static"
 INDEX_HTML  = STATIC_DIR / "index.html"
 R1_HTML     = STATIC_DIR / "r1.html"   # the original R1 dashboard, served for design reference
+# Arena pair boosts (weekly 1.2–1.5× score multipliers, announced manually each
+# Monday). POST /boosts writes data/boosts.json; ./data is volume-mounted into
+# the engine container, and volume_climb re-reads it every ~60s — so a Monday
+# update reaches a RUNNING engine without a restart.
+BOOSTS_FILE = BACKEND_DIR / "data" / "boosts.json"
 
 # Fail closed on a real deployment with no key set.
 if not MOCK and not API_KEY:
@@ -304,6 +309,11 @@ class LaunchBody(BaseModel):
     bleed_cap: float | None = None  # steady only
     cost_ceil: float | None = None  # steady only
     spread_gate: float | None = None  # steady + fast
+    weekly_target: float | None = None  # steady only — Arena weekly volume cap
+
+
+class BoostsBody(BaseModel):
+    boosts: dict[str, float]        # pair -> weekly score multiplier
 
 
 class LoginBody(BaseModel):
@@ -393,10 +403,35 @@ def audit(n: int = 50, _=Depends(require_key)):
 
 
 # ── Control endpoints ─────────────────────────────────────────────────────
+@app.get("/boosts")
+def get_boosts(_=Depends(require_key)):
+    try:
+        return json.loads(BOOSTS_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return {"boosts": {}}
+
+
+@app.post("/boosts")
+def set_boosts(body: BoostsBody, _=Depends(require_key)):
+    """Set the week's pair boosts (from the Monday announcement). Replaces the
+    whole map — send every boosted pair each time; {} clears all boosts. The
+    engine applies it within ~60s, no restart needed."""
+    bad = {k: v for k, v in body.boosts.items() if not (0.5 <= v <= 5.0)}
+    if bad:
+        raise HTTPException(status_code=400,
+                            detail=f"multiplier(s) outside the 0.5–5.0 sanity band: {bad}")
+    BOOSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = BOOSTS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"boosts": body.boosts, "updated_at": _time.time()}, indent=2))
+    tmp.replace(BOOSTS_FILE)
+    engine.audit("boosts", body.boosts)
+    return {"ok": True, "boosts": body.boosts}
+
+
 @app.post("/launch")
 def launch(body: LaunchBody, _=Depends(require_key)):
     params = {"target": body.target, "leg": body.leg}
-    for k in ("pair", "slip", "bleed_cap", "cost_ceil", "spread_gate"):
+    for k in ("pair", "slip", "bleed_cap", "cost_ceil", "spread_gate", "weekly_target"):
         v = getattr(body, k)
         if v is not None:
             params[k] = v
