@@ -180,6 +180,7 @@ if PREAPPROVE:
         ensure_allowance(sp["pool"], sp["base"],  sp["bdec"], TARGET_VOLUME / 1000.0)
 
 vol = 0.0; trips = 0; consec_fail = 0; _net_fails = 0
+wk_cur = week_idx(time.time()); wk_vol = 0.0   # Arena week window (Mon 00:00 UTC)
 _last_trade_ts = time.time()   # keepalive clock — reset on every successful trip
 from collections import deque
 # COST_CEIL_PER_1K is now a PRE-TRADE ceiling on the toll the live book implies
@@ -202,6 +203,46 @@ try:
 except Exception:
     SOMI_PX = 0.10
 print(f"cost-aware: spread_gate={SPREAD_GATE_PCT}% cost_ceil=${COST_CEIL_PER_1K}/1k window={COST_WINDOW} somi_px={SOMI_PX:.4f}")
+
+# ── Arena Phase-0: pair boosts + weekly window ────────────────────────────
+# The Algo Arena scores volume × a per-pair weekly boost (1.2–1.5×, announced
+# manually each Monday) over Monday-00:00-UTC → Sunday weeks. Boosts arrive via
+# data/boosts.json (written by the control API's POST /boosts — ./data is
+# volume-mounted into the container) and are re-read at most every 60s, so a
+# Monday announcement takes effect mid-run without a restart. No file / empty
+# file ⇒ every boost 1.0 ⇒ exactly the old rotation (safe under R4 too).
+BOOSTS_FILE   = os.environ.get("CLIMB_BOOSTS_FILE", "data/boosts.json")
+WEEKLY_TARGET = float(os.environ.get("CLIMB_WEEKLY_TARGET", "0"))  # 0 = no weekly cap
+
+_boosts = {"ts": 0.0, "map": {}}
+def pair_boosts() -> dict:
+    now = time.time()
+    if now - _boosts["ts"] >= 60:
+        _boosts["ts"] = now
+        try:
+            import json
+            with open(BOOSTS_FILE) as fh:
+                raw = json.load(fh)
+            src = raw.get("boosts", raw) if isinstance(raw, dict) else {}
+            m = {}
+            for k, v in src.items():
+                try:
+                    b = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if 0.5 <= b <= 5.0:   # sanity band — a typo'd 15 must not hijack rotation
+                    m[str(k)] = b
+            _boosts["map"] = m
+        except FileNotFoundError:
+            _boosts["map"] = {}
+        except Exception as e:
+            print(f"  boosts.json read err {str(e)[:60]} — keeping {_boosts['map']}")
+    return _boosts["map"]
+
+def week_idx(ts: float) -> int:
+    """Contest week number. Weeks run Monday 00:00 UTC → Sunday 23:59 UTC; the
+    unix epoch was a Thursday, so a 3-day shift Monday-aligns the boundary."""
+    return int((ts + 3 * 86400) // 604800)
 
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", ""); TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG_MS = float(os.environ.get("CLIMB_TG_MILESTONE", "25000"))
@@ -313,8 +354,14 @@ def pick_cheapest(leg_usd):
     whose visible depth can't absorb our order is skipped: WETH's touch often holds
     less than an $80 leg, so its quoted spread understates the true cost by ~50%.
 
-    Returns (spec, ob, eff_pct, quoted_pct, within_gate); (None,...) if no pair
-    has a usable book. Falls back to top-of-book if the depth fetch fails."""
+    Boost-aware (Arena): pairs are ranked by eff ÷ boost — the spread paid per
+    unit of SCORE, not per unit of raw volume — and the gates scale the same way
+    (a 1.5× pair is allowed 1.5× the toll for the same score). All boosts 1.0
+    reduces this to the plain effective-spread ranking.
+
+    Returns (spec, ob, eff_pct, quoted_pct, boost, within_gate); (None,...) if no
+    pair has a usable book. Falls back to top-of-book if the depth fetch fails."""
+    boosts = pair_boosts()
     best = None
     for sp in SPECS.values():
         try:
@@ -338,24 +385,39 @@ def pick_cheapest(leg_usd):
                 continue
             mid = (ob["bid"] + ob["ask"]) / 2
             quoted = eff = (ob["ask"] - ob["bid"]) / mid * 100
-        if best is None or eff < best[2]:
-            best = (sp, ob, eff, quoted)
+        bst = boosts.get(sp["pair"], 1.0)
+        if best is None or eff / bst < best[0]:
+            best = (eff / bst, sp, ob, eff, quoted, bst)
     if best is None:
-        return None, None, None, None, False
-    sp, ob, eff, quoted = best
+        return None, None, None, None, 1.0, False
+    _, sp, ob, eff, quoted, bst = best
     # A round-trip crosses the effective spread once on a notional of `leg`, and
     # books 2x leg of volume — so the toll per 1k of volume is eff% x 5.
     implied_toll = eff * 5.0
     within = True
-    if SPREAD_GATE_PCT > 0 and eff > SPREAD_GATE_PCT:
+    if SPREAD_GATE_PCT > 0 and eff / bst > SPREAD_GATE_PCT:
         within = False
-    if COST_CEIL_PER_1K > 0 and implied_toll > COST_CEIL_PER_1K:
+    if COST_CEIL_PER_1K > 0 and implied_toll / bst > COST_CEIL_PER_1K:
         within = False
-    return sp, ob, eff, quoted, within
+    return sp, ob, eff, quoted, bst, within
 
 for i in range(MAX_ITERS):
     try:
         if vol >= TARGET_VOLUME: stop("target volume reached")
+
+        # Arena week rollover + optional weekly cap. The cap IDLES (engine stays
+        # up, resumes Monday) instead of stopping — a stop would end the run and
+        # need a manual relaunch every week. NOTE: while idling here nothing
+        # trades, which is fine under Arena rules (no idle DQ) — leave
+        # CLIMB_WEEKLY_TARGET=0 in contests that DQ idle wallets (R4 rule 11).
+        nw = week_idx(time.time())
+        if nw != wk_cur:
+            wk_cur = nw; wk_vol = 0.0
+            print(f"[{i}] new contest week (idx {nw}) — weekly volume counter reset")
+            tg(f"📅 New contest week — weekly counter reset (lifetime ${vol:,.0f})")
+        if WEEKLY_TARGET > 0 and wk_vol >= WEEKLY_TARGET:
+            print(f"[{i}] weekly target ${WEEKLY_TARGET:,.0f} reached (wk ${wk_vol:,.0f}) — idling until Monday")
+            time.sleep(PAUSE_EXP_S * 4); continue
 
         # Sweep stray bags FIRST, so the capital checks below measure a flat wallet.
         # A prior trip's sell may have failed on a pair the rotation isn't currently
@@ -379,7 +441,7 @@ for i in range(MAX_ITERS):
         if consec_fail >= MAX_CONSEC_FAIL: stop(f"{MAX_CONSEC_FAIL} consecutive failures")
 
         # Rank by the spread we'd ACTUALLY pay at our leg size, not the quote.
-        sp, ob, spread_pct, quoted_pct, within = pick_cheapest(LEG_USD)
+        sp, ob, spread_pct, quoted_pct, boost, within = pick_cheapest(LEG_USD)
         if sp is None:
             print(f"[{i}] no pair with a book deep enough for a ${LEG_USD:.0f} leg — pause {PAUSE_EXP_S:.0f}s")
             time.sleep(PAUSE_EXP_S); continue
@@ -388,9 +450,10 @@ for i in range(MAX_ITERS):
         force_keepalive = (not within) and idle_s > LIVENESS_S
         if not within and not force_keepalive:
             toll = spread_pct * 5.0
-            why = (f"toll ${toll:.3f}/1k > ceil ${COST_CEIL_PER_1K}/1k"
-                   if (COST_CEIL_PER_1K > 0 and toll > COST_CEIL_PER_1K)
-                   else f"eff {spread_pct:.3f}% > gate {SPREAD_GATE_PCT}%")
+            bnote = f" (boost {boost:g}x)" if boost != 1.0 else ""
+            why = (f"toll ${toll:.3f}/1k{bnote} > ceil ${COST_CEIL_PER_1K}/1k x boost"
+                   if (COST_CEIL_PER_1K > 0 and toll / boost > COST_CEIL_PER_1K)
+                   else f"eff {spread_pct:.3f}%{bnote} > gate {SPREAD_GATE_PCT}% x boost")
             if not _paused: tg(f"⏸ Paused @ ${vol:,.0f} vol — book too dear: {why}"); _paused = True
             print(f"[{i}] book too dear on {sp['pair']}: eff {spread_pct:.3f}% -> toll ${toll:.3f}/1k ({why}) "
                   f"— pause {PAUSE_EXP_S:.0f}s (idle {idle_s/3600:.1f}h)")
@@ -446,6 +509,9 @@ for i in range(MAX_ITERS):
 
         vt = got*mid*2
         vol += vt; trips += 1; consec_fail = 0; _last_trade_ts = time.time()
+        if week_idx(time.time()) != wk_cur:   # trip landed across a Monday boundary
+            wk_cur = week_idx(time.time()); wk_vol = 0.0
+        wk_vol += vt
         if _net_fails:
             print(f"[{i}] network recovered after {_net_fails} failed attempt(s)")
             tg(f"🌐 Network back @ ${vol:,.0f} vol — trading resumed"); _net_fails = 0
@@ -454,8 +520,9 @@ for i in range(MAX_ITERS):
         _costs.append(cost_1k); roll = sum(_costs)/len(_costs)
         impact = spread_pct - quoted_pct
         implied = spread_pct * 5.0
-        print(f"[{i}] trip {trips} {tag} @eff {spread_pct:.3f}% (quoted {quoted_pct:.3f}%, impact {impact:+.3f}%): "
-              f"vol+=${vt:.2f} tot=${vol:.2f} USDso={u:.4f}(bleed ${u_start-u:.4f}) SOMI={s:.4f} "
+        bnote = f" boost {boost:g}x" if boost != 1.0 else ""
+        print(f"[{i}] trip {trips} {tag} @eff {spread_pct:.3f}% (quoted {quoted_pct:.3f}%, impact {impact:+.3f}%){bnote}: "
+              f"vol+=${vt:.2f} tot=${vol:.2f} wk=${wk_vol:.2f} USDso={u:.4f}(bleed ${u_start-u:.4f}) SOMI={s:.4f} "
               f"| implied ${implied:.3f}/1k cost ${cost_1k:.3f}/1k roll ${roll:.3f}/1k")
         if _paused:
             tg(f"▶️ Resumed @ ${vol:,.0f} vol — book cheap again"); _paused = False
