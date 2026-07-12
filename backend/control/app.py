@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import hmac
+import json
 import time as _time
 
 from fastapi import FastAPI, Header, HTTPException, Depends, Request
@@ -33,11 +34,29 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from control.engine_manager import EngineManager, EngineError, MOCK
+from control.engine_manager import EngineManager, EngineError, MOCK, STATE_DIR
 
 # R4 rule 5: eligible pairs ONLY. USDC.e:USDso is a STABLECOIN pair and must never
 # be traded (removal risk). Enforced at /launch and /trade so it can't be entered.
 ELIGIBLE_PAIRS = {"WBTC:USDso", "WETH:USDso", "SOMI:USDso"}
+
+# Idle-DQ keepalive (contest rule: >24h without a trade = DQ). A cron hits
+# POST /keepalive hourly; we act only when lifetime volume hasn't moved for
+# KEEPALIVE_AGE_S. 20h + hourly cron ⇒ worst-case trade at ~21h idle, inside 24h.
+KEEPALIVE_AGE_S = float(os.environ.get("CONTROL_KEEPALIVE_AGE_S", 20 * 3600))
+KEEPALIVE_USDSO = float(os.environ.get("CONTROL_KEEPALIVE_USDSO", 1.0))
+KEEPALIVE_FILE = STATE_DIR / "keepalive.json"
+
+def _keepalive_state() -> dict:
+    try:
+        return json.loads(KEEPALIVE_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+
+def _save_keepalive_state(st: dict) -> None:
+    tmp = KEEPALIVE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st))
+    tmp.replace(KEEPALIVE_FILE)
 
 # Simple per-IP brute-force limiter for /login (no external dep).
 _login_fails: dict = {}
@@ -463,6 +482,43 @@ def autorestart(_=Depends(require_key)):
         return {"action": "failed", "error": str(e)}
     engine.audit("autorestart", {"mode": mode, "params": params, "after": st.get("end_reason")})
     return {"action": "relaunched", "mode": mode, "params": params}
+
+
+@app.post("/keepalive")
+def keepalive(_=Depends(require_key)):
+    """Idle-DQ guard (cron, hourly). While an engine runs it trades on its own;
+    after a self-stop (target hit, breaker) nothing trades and the >24h-idle DQ
+    clock starts. Detection: the leaderboard's lifetime volume only moves on a
+    trade, so if it hasn't moved for KEEPALIVE_AGE_S we buy KEEPALIVE_USDSO of
+    SOMI — one real IOC that resets the idle clock AND lands as gas we need
+    anyway. When the board is unreachable we fall back to the same idle timer
+    (a spare $1 trade is cheaper than a DQ)."""
+    if engine.is_running():
+        return {"action": "none", "reason": "engine running — it trades on its own"}
+    now = _time.time()
+    st = _keepalive_state()
+    try:
+        lb = backend.leaderboard()
+        vol = lb.get("my_volume") if lb.get("live") else None
+    except Exception:
+        vol = None
+    if not st:
+        _save_keepalive_state({"volume": vol, "changed_at": now})
+        return {"action": "none", "reason": "first check — baseline recorded", "volume": vol}
+    if vol is not None and vol != st.get("volume"):
+        _save_keepalive_state({"volume": vol, "changed_at": now})
+        return {"action": "none", "reason": "volume moved — a trade happened", "volume": vol}
+    idle_s = now - (st.get("changed_at") or now)
+    if idle_s < KEEPALIVE_AGE_S:
+        return {"action": "none",
+                "reason": f"idle {idle_s / 3600:.1f}h < {KEEPALIVE_AGE_S / 3600:.0f}h threshold"}
+    engine.audit("keepalive", {"idle_h": round(idle_s / 3600, 1), "usdso": KEEPALIVE_USDSO})
+    try:
+        res = backend.gas_topup(KEEPALIVE_USDSO)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+    _save_keepalive_state({"volume": vol, "changed_at": now})
+    return {"action": "traded", "idle_h": round(idle_s / 3600, 1), "result": res}
 
 
 @app.post("/gas/topup")
