@@ -217,6 +217,14 @@
                 <!-- Tunables -->
                 <div class="flex flex-wrap gap-4 items-end border-t border-border pt-4">
                     <div class="flex flex-col gap-1">
+                        <span class="text-xs text-textMuted uppercase">Pairs</span>
+                        <div class="flex border border-border" id="pair-group" title="STEADY rotates across every selected pair (trades the cheapest book each trip). FAST takes exactly one.">
+                            <button class="btn-base border-none px-3 py-1 text-sm btn-active" data-pair="WBTC:USDso" onclick="togglePair(this)">WBTC</button>
+                            <button class="btn-base border-none border-l border-border px-3 py-1 text-sm btn-active" data-pair="WETH:USDso" onclick="togglePair(this)">WETH</button>
+                            <button class="btn-base border-none border-l border-border px-3 py-1 text-sm" data-pair="SOMI:USDso" onclick="togglePair(this)" title="native-base pair — STEADY rotation excludes it; FAST only">SOMI</button>
+                        </div>
+                    </div>
+                    <div class="flex flex-col gap-1">
                         <label class="text-xs text-textMuted uppercase">Target volume ($)</label>
                         <input id="f_target" type="number" class="input-base w-32" value="100000">
                     </div>
@@ -236,9 +244,9 @@
                         <label class="text-xs text-textMuted uppercase">Cost ceil $/1k</label>
                         <input id="f_cost" type="number" step="0.01" class="input-base w-24" value="0.15">
                     </div>
-                    <div class="flex flex-col gap-1 mode-fast hidden">
+                    <div class="flex flex-col gap-1">
                         <label class="text-xs text-textMuted uppercase">Spread gate %</label>
-                        <input id="f_gate" type="number" step="0.01" class="input-base w-24" value="0.15">
+                        <input id="f_gate" type="number" step="0.01" class="input-base w-24" placeholder="0.05" title="skip trips while the pair's effective spread is above this — blank = engine default">
                     </div>
                 </div>
 
@@ -482,6 +490,23 @@ function setMode(m){
   document.querySelectorAll(".mode-steady").forEach(e=>e.classList.toggle("hidden", m!=="steady"));
   document.querySelectorAll(".mode-fast").forEach(e=>e.classList.toggle("hidden", m!=="fast"));
   $("f_slip").placeholder = m==="steady" ? "0.003" : "0.004";
+  $("f_gate").placeholder = m==="steady" ? "0.05" : "0.15";
+  // FAST runs one pair (DP_PAIR is single) — trim a multi-selection to its first.
+  if(m==="fast"){
+    document.querySelectorAll("#pair-group .btn-active").forEach((b,i)=>{
+      if(i>0) b.classList.remove("btn-active");
+    });
+  }
+}
+function selectedPairs(){
+  return [...document.querySelectorAll("#pair-group .btn-active")].map(b=>b.dataset.pair);
+}
+function togglePair(btn){
+  if(MODE==="fast"){  // radio behaviour — FAST takes exactly one pair
+    document.querySelectorAll("#pair-group button").forEach(b=>b.classList.toggle("btn-active", b===btn));
+  } else {
+    btn.classList.toggle("btn-active");
+  }
 }
 function setSide(s){ SIDE=s;
   document.querySelectorAll("#t-side button").forEach(b=>b.classList.toggle("btn-active", b.dataset.side===s)); }
@@ -489,15 +514,20 @@ function setSide(s){ SIDE=s;
 // ── actions ───────────────────────────────────────────────────────────
 function launchBody(){
   const b = {mode:MODE, target:+$("f_target").value, leg:+$("f_leg").value};
+  const pairs = selectedPairs();
+  if(pairs.length) b.pair = pairs.join(",");
   if($("f_slip").value) b.slip=+$("f_slip").value;
+  if($("f_gate").value) b.spread_gate=+$("f_gate").value;
   if(MODE==="steady"){ b.bleed_cap=+$("f_bleed").value; b.cost_ceil=+$("f_cost").value; }
-  else { b.spread_gate=+$("f_gate").value; }
   return b;
 }
 function confirmLaunch(){
+  const pairs = selectedPairs();
+  if(!pairs.length){ toast("✗ select at least one pair"); return; }
+  if(MODE==="fast" && pairs.length>1){ toast("✗ FAST takes exactly one pair"); return; }
   const b=launchBody();
   modal("Launch "+MODE+" run",
-    `Target $${b.target.toLocaleString()}, leg $${b.leg}. This spends real capital. Proceed?`,
+    `${pairs.map(p=>p.split(":")[0]).join(" + ")} · target $${b.target.toLocaleString()}, leg $${b.leg}. This spends real capital. Proceed?`,
     async()=>{ try{ await api("/launch",{method:"POST",body:JSON.stringify(b)});
       toast("Launched "+MODE); refreshStatus(); }catch(e){ toast("✗ "+e.message); } });
 }
