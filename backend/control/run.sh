@@ -14,9 +14,15 @@
 #
 # Usage:  ./control/run.sh [port]        (default 8787)
 #         nohup ./control/run.sh 8787 > /tmp/control.log 2>&1 &   # detached
+#
+# Bind address: CONTROL_BIND (default 0.0.0.0). The box has no public IP, the
+# cloudflared tunnel needs localhost, and the operator also hits the raw
+# tailscale IP — so 0.0.0.0 stays the default. Set CONTROL_BIND=127.0.0.1 to
+# go tunnel-only (drops LAN/docker-network + direct-IP access).
 set -euo pipefail
 cd "$(dirname "$0")/.."          # -> backend/
 PORT="${1:-8787}"
+BIND="${CONTROL_BIND:-0.0.0.0}"
 VENV="control/.venv"
 
 if [ ! -d "$VENV" ]; then
@@ -33,5 +39,5 @@ else
   echo "[control] deps present — skipping install"
 fi
 
-echo "[control] serving on 0.0.0.0:$PORT  (mock=${CONTROL_MOCK:-0})"
-exec "$VENV/bin/python3" -m uvicorn control.app:app --host 0.0.0.0 --port "$PORT"
+echo "[control] serving on $BIND:$PORT  (mock=${CONTROL_MOCK:-0})"
+exec "$VENV/bin/python3" -m uvicorn control.app:app --host "$BIND" --port "$PORT"
