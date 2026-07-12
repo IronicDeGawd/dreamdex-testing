@@ -122,6 +122,8 @@ class EngineManager:
             "CLIMB_PAUSE_EXP_S":     "45",
             # Wide window: realized cost is a safety breaker now, not the throttle.
             "CLIMB_COST_WINDOW":     "50",
+            # Arena weekly cap (0 = off). Boosts travel via data/boosts.json, not env.
+            "CLIMB_WEEKLY_TARGET":   str(p.get("weekly_target", 0)),
         }
 
     def _fast_env(self, p: dict) -> dict:
