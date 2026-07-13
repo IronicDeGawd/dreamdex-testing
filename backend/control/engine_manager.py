@@ -32,6 +32,7 @@ STATE_DIR   = Path(os.environ.get("CONTROL_STATE_DIR", str(BACKEND_DIR / "contro
 LOG_DIR     = STATE_DIR / "logs"
 STATE_FILE  = STATE_DIR / "engine.json"
 AUDIT_FILE  = STATE_DIR / "audit.log"
+RUNS_FILE   = STATE_DIR / "runs.jsonl"   # one record per finished run: baseline, final, pnl, gas
 CONTAINER   = os.environ.get("CONTROL_CONTAINER_NAME", "dreamdex_engine")
 COMPOSE_SVC = os.environ.get("CONTROL_COMPOSE_SERVICE", "agent")
 
@@ -39,6 +40,17 @@ COMPOSE_SVC = os.environ.get("CONTROL_COMPOSE_SERVICE", "agent")
 _VOL_RE  = re.compile(r"tot=\$([0-9]+(?:\.[0-9]+)?)")
 # Steady engine also prints a rolling cost `roll $<num>/1k`.
 _ROLL_RE = re.compile(r"roll \$([0-9]+(?:\.[0-9]+)?)/1k")
+# Per-run P&L, parsed from the engines' own logs. The maker's printed networth
+# includes funds locked in its resting orders — invisible to any balance read,
+# so its own figures are the authoritative ones while it runs.
+_HB_RE       = re.compile(r"hb networth=\$([0-9]+(?:\.[0-9]+)?) \(([+-][0-9]+(?:\.[0-9]+)?)\)")
+_START_MK_RE = re.compile(r"START networth=\$([0-9]+(?:\.[0-9]+)?) SOMI=([0-9]+(?:\.[0-9]+)?)")
+_START_ST_RE = re.compile(r"START USDso=([0-9]+(?:\.[0-9]+)?) .*SOMI=([0-9]+(?:\.[0-9]+)?)")
+_BLEED_ST_RE = re.compile(r"\(bleed \$(-?[0-9]+(?:\.[0-9]+)?)\)")
+_USDSO_RE    = re.compile(r"USDso=([0-9]+(?:\.[0-9]+)?)")
+_SOMI_RE     = re.compile(r"(?:SOMI|somi)=([0-9]+(?:\.[0-9]+)?)")
+_STOP_MK_RE  = re.compile(r"networth=\$([0-9]+(?:\.[0-9]+)?) bleed=\$([+-][0-9]+(?:\.[0-9]+)?) "
+                          r"gas=(-?[0-9]+(?:\.[0-9]+)?) SOMI")
 
 MODES = ("steady", "fast", "maker")
 
@@ -67,6 +79,15 @@ class EngineManager:
     # ── liveness ──────────────────────────────────────────────────────────
     def _proc_alive(self, pid) -> bool:
         if not pid:
+            return False
+        # A self-exited mock engine lingers as a zombie (we never wait() on it)
+        # and still answers signal 0 — reap it so the run reconciles to stopped.
+        try:
+            done, _ = os.waitpid(int(pid), os.WNOHANG)
+            return done == 0
+        except ChildProcessError:
+            pass   # not our child (control restarted) — fall through to signal 0
+        except (OSError, ValueError):
             return False
         try:
             os.kill(int(pid), 0)
@@ -178,7 +199,7 @@ class EngineManager:
         argv += [COMPOSE_SVC, "python3", script]
         return argv, engine_env
 
-    def launch(self, mode: str, params: dict) -> dict:
+    def launch(self, mode: str, params: dict, baseline: dict | None = None) -> dict:
         if mode not in MODES:
             raise EngineError(f"unknown mode {mode!r} (want one of {MODES})")
         if "target" not in params or "leg" not in params:
@@ -216,6 +237,9 @@ class EngineManager:
             "log_path":   str(log_path),
             "started_at": time.time(),
             "mock":       MOCK,
+            # Capital+gas snapshot taken by the caller right before launch (wallet
+            # is flat then, so plain balance reads are exact). None if the read failed.
+            "baseline":   baseline,
         }
         self._write_state(state)
         self.audit("launch", {"mode": mode, **params})
@@ -282,6 +306,15 @@ class EngineManager:
         except (OSError, TypeError):
             return []
 
+    def _head(self, path: str, n: int) -> list[str]:
+        # The engines print their START balance line within the first few lines;
+        # on a long run _tail(400) never sees it.
+        try:
+            with open(path, "r", errors="replace") as fh:
+                return [line.rstrip("\n") for line, _ in zip(fh, range(n))]
+        except (OSError, TypeError):
+            return []
+
     def status(self) -> dict:
         st = self._read_state()
         running = self.is_running()
@@ -311,7 +344,89 @@ class EngineManager:
                 if r:
                     out["cost_per_1k"] = float(r.group(1))
                 break
+        out.update(self._run_pnl(st, lines))
         return out
+
+    def _run_pnl(self, st: dict, tail: list[str]) -> dict:
+        """Per-run baseline + live P&L/gas. Baseline comes from the launch-time
+        snapshot in state, or (for runs launched before snapshots existed) from
+        the engine's own START log line."""
+        mode = st.get("mode")
+        baseline = st.get("baseline")
+        if not baseline:
+            for line in self._head(st.get("log_path"), 40):
+                m = _START_MK_RE.search(line) or _START_ST_RE.search(line)
+                if m:
+                    baseline = {"source": "log", "networth": float(m.group(1)),
+                                "somi": float(m.group(2))}
+                    break
+        out = {"baseline": baseline, "networth_now": None, "run_pnl": None,
+               "gas_used_somi": None, "final": st.get("final")}
+        for line in reversed(tail):
+            if mode == "maker":
+                m = _STOP_MK_RE.search(line)
+                if m:   # STOP summary: bleed = start − now, gas already a delta
+                    out["networth_now"] = float(m.group(1))
+                    out["run_pnl"] = -float(m.group(2))
+                    out["gas_used_somi"] = float(m.group(3))
+                    break
+                m = _HB_RE.search(line)
+                if m:   # heartbeat prints the signed delta vs its own start
+                    out["networth_now"] = float(m.group(1))
+                    out["run_pnl"] = float(m.group(2))
+                    break
+            elif mode == "steady":
+                m = _BLEED_ST_RE.search(line)
+                if m:
+                    out["run_pnl"] = round(-float(m.group(1)), 4)
+                    s = _SOMI_RE.search(line)
+                    if s and baseline and baseline.get("somi") is not None:
+                        out["gas_used_somi"] = round(baseline["somi"] - float(s.group(1)), 4)
+                    break
+            elif mode == "fast":
+                # Fast trip line has no bleed field — needs the launch snapshot.
+                m = _USDSO_RE.search(line)
+                if m and baseline and baseline.get("usdso") is not None:
+                    out["run_pnl"] = round(float(m.group(1)) - baseline["usdso"], 4)
+                    s = _SOMI_RE.search(line)
+                    if s and baseline.get("somi") is not None:
+                        out["gas_used_somi"] = round(baseline["somi"] - float(s.group(1)), 4)
+                    break
+        # A recorded final verdict (post-flatten chain read) beats log parses.
+        fin = st.get("final")
+        if fin:
+            for src, dst in (("pnl", "run_pnl"), ("gas_somi", "gas_used_somi"),
+                             ("networth", "networth_now")):
+                if fin.get(src) is not None:
+                    out[dst] = fin[src]
+        return out
+
+    def finalize(self, final: dict) -> dict:
+        """Record the end-of-run verdict once (idempotent — an explicit /stop and
+        the /status self-stop observer can both call this; first one wins) and
+        append the run's full record to runs.jsonl."""
+        st = self._read_state()
+        if not st or st.get("final") or not st.get("started_at"):
+            return st
+        st["final"] = final
+        self._write_state(st)
+        vol = None
+        for line in reversed(self._tail(st.get("log_path"), 400)):
+            m = _VOL_RE.search(line)
+            if m:
+                vol = float(m.group(1))
+                break
+        rec = {"started_at": st.get("started_at"), "ended_at": st.get("ended_at"),
+               "mode": st.get("mode"), "params": st.get("params"),
+               "end_reason": st.get("end_reason"), "volume": vol,
+               "baseline": st.get("baseline"), "final": final,
+               "pnl": final.get("pnl"), "gas_somi": final.get("gas_somi")}
+        try:
+            with open(RUNS_FILE, "a") as fh:
+                fh.write(json.dumps(rec) + "\n")
+        except OSError:
+            pass
+        return st
 
     def logs(self, n: int = 80) -> dict:
         st = self._read_state()

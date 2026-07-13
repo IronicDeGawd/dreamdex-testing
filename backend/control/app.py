@@ -105,6 +105,11 @@ class MockBackend:
     def free_usdso(self):
         return 200.0
 
+    def run_snapshot(self):
+        return {"ts": _time.time(), "source": "mock", "usdso": 200.0, "vault": 0.0,
+                "somi": 30.0, "somi_px": 0.10, "bags": {}, "bags_usd": 0.0,
+                "networth": 203.0}
+
     def leaderboard(self):
         return {"my_rank": 3, "total": 9, "my_volume": 91843.9, "my_pnl": -13.83,
                 "my_tx": 1176, "gap": 51823.64, "gap_to": "#2",
@@ -181,6 +186,39 @@ class LiveBackend:
         except Exception:
             return self._summary().get("usdso_wallet", 0.0)
 
+    def run_snapshot(self):
+        # Exact capital + gas at a run boundary. Only valid when the wallet is
+        # flat (launch, post-flatten stop) — mid-run, funds locked in resting
+        # orders are invisible to every balance read. networth mirrors the
+        # maker's own definition (USDso + vault + bags@mid + SOMI@mid) so the
+        # two figures are directly comparable.
+        b = self.balances()
+        somi_px = None
+        try:
+            ob = self.dex.get_orderbook("SOMI:USDso")
+            if ob.get("bid") and ob.get("ask"):
+                somi_px = (ob["bid"] + ob["ask"]) / 2
+        except Exception:
+            pass
+        bags_usd = 0.0
+        for pair, qty in (b.get("bags") or {}).items():
+            if qty <= 1e-9:
+                continue
+            try:
+                ob = self.dex.get_orderbook(pair)
+                mid = ((ob.get("bid") or 0) + (ob.get("ask") or 0)) / 2
+                bags_usd += qty * mid
+            except Exception:
+                pass
+        networth = b["usdso"] + b["usdso_vault"] + bags_usd
+        if somi_px:
+            networth += b["somi"] * somi_px
+        return {"ts": _time.time(), "source": "live", "usdso": b["usdso"],
+                "vault": b["usdso_vault"], "somi": b["somi"],
+                "somi_px": round(somi_px, 6) if somi_px else None,
+                "bags": b.get("bags") or {}, "bags_usd": round(bags_usd, 4),
+                "networth": round(networth, 4)}
+
     def leaderboard(self):
         st = self.lb.get_my_stats()
         return {"my_rank": st.get("my_rank"), "total": st.get("total"),
@@ -199,14 +237,31 @@ class LiveBackend:
             usdso = self.dex.wallet.erc20_balance(self.cfg.USDSO_ADDRESS, 18)
             inv = 0.0
             for pair, m in self.cfg.MARKETS.items():
-                if pair not in ELIGIBLE_PAIRS or m.get("native") or int(str(m["base"]), 16) == 0:
+                if pair not in ELIGIBLE_PAIRS:
                     continue
-                b = self.dex.wallet.erc20_balance(m["base"], int(m["baseDecimals"]))
-                if b <= 0:
+                native = m.get("native") or int(str(m["base"]), 16) == 0
+                b = 0.0 if native else self.dex.wallet.erc20_balance(m["base"], int(m["baseDecimals"]))
+                # Funds locked in OUR resting orders are invisible to balanceOf
+                # (5th instance of the bug class) — while the maker quotes, a
+                # resting $40 order read as burned capital and inflated $/1k.
+                locked_base = 0.0
+                try:
+                    for o in (self.dex.get_open_orders(pair) or []):
+                        rem = float(o.get("remaining") or 0)
+                        px = float(o.get("price") or 0)
+                        if rem <= 0 or px <= 0:
+                            continue
+                        if o.get("side") == "buy":
+                            usdso += rem * px
+                        else:
+                            locked_base += rem
+                except Exception:
+                    pass
+                if b + locked_base <= 0:
                     continue
                 ob = self.dex.get_orderbook(pair)
                 mid = ((ob.get("bid") or 0) + (ob.get("ask") or 0)) / 2
-                inv += b * mid
+                inv += (b + locked_base) * mid
             cap = usdso + inv
             for r in rows:
                 if not r.get("is_me"):
@@ -374,7 +429,19 @@ def login(body: LoginBody, request: Request):
 # ── Read endpoints ────────────────────────────────────────────────────────
 @app.get("/status")
 def status(_=Depends(require_key)):
-    return engine.status()
+    out = engine.status()
+    # An engine that stops itself (target hit / bleed cap / breaker) never goes
+    # through /stop — record its final verdict here, once. The 30s grace keeps
+    # a dashboard poll from racing an explicit /stop's stop→flatten→finalize
+    # (engines flatten themselves on self-stop, so the read is accurate by then).
+    if (not out.get("running") and out.get("started_at") and not out.get("final")
+            and out.get("ended_at") and _time.time() - out["ended_at"] > 30):
+        try:
+            _finalize_run()
+            out = engine.status()
+        except Exception:
+            pass
+    return out
 
 
 @app.get("/balances")
@@ -461,10 +528,39 @@ def launch(body: LaunchBody, _=Depends(require_key)):
         )
 
     try:
-        state = engine.launch(body.mode, params)
+        state = engine.launch(body.mode, params, baseline=_run_baseline("launch"))
     except EngineError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True, "state": state}
+
+
+def _run_baseline(source: str):
+    """Capital+gas snapshot for a run about to start. A failed read must never
+    block a launch — return None and let the START-log fallback cover display."""
+    try:
+        baseline = backend.run_snapshot()
+        baseline["source"] = source
+        return baseline
+    except Exception:
+        return None
+
+
+def _finalize_run():
+    """Record the run's final capital verdict (post-flatten, wallet flat again)
+    and its runs.jsonl record. Idempotent via engine.finalize."""
+    st = engine._read_state()
+    if not st or st.get("final") or not st.get("started_at"):
+        return
+    final = backend.run_snapshot()
+    final["source"] = "final"
+    # Launch-time snapshot, or the START-log fallback engine.status() synthesizes.
+    base = st.get("baseline") or engine.status().get("baseline") or {}
+    pnl = round(final["networth"] - base["networth"], 4) if base.get("networth") is not None else None
+    gas = round(base["somi"] - final["somi"], 4) if base.get("somi") is not None else None
+    final["pnl"] = pnl
+    final["gas_somi"] = gas
+    final["gas_usd"] = round(gas * final["somi_px"], 4) if (gas is not None and final.get("somi_px")) else None
+    engine.finalize(final)
 
 
 @app.post("/stop")
@@ -479,7 +575,11 @@ def stop(_=Depends(require_key)):
         flat = backend.flatten()
     except Exception as e:
         flat = {"status": "error", "error": str(e)[:160]}
-    return {"ok": True, "state": st, "flatten": flat}
+    try:
+        _finalize_run()
+    except Exception:
+        pass   # bookkeeping must never fail the stop
+    return {"ok": True, "state": engine._read_state() or st, "flatten": flat}
 
 
 @app.post("/autorestart")
@@ -515,7 +615,9 @@ def autorestart(_=Depends(require_key)):
     except Exception:
         pass
     try:
-        engine.launch(mode, params)
+        # Post-crash the wallet may still hold order-locked funds this read can't
+        # see; the maker's own START log line (parsed as fallback) corrects networth.
+        engine.launch(mode, params, baseline=_run_baseline("autorestart"))
     except EngineError as e:
         return {"action": "failed", "error": str(e)}
     engine.audit("autorestart", {"mode": mode, "params": params, "after": st.get("end_reason")})
