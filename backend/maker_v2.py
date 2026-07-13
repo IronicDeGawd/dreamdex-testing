@@ -115,10 +115,31 @@ def pool_reserved(sp, token, dec) -> float:
     except Exception:
         return 0.0
 
+def locked_in_orders(pair):
+    """(quote_locked, base_locked) sitting inside OUR resting orders. Funds
+    backing a live order are invisible to BOTH balanceOf and
+    getWithdrawableBalance (locked ≠ withdrawable) — proven live 2026-07-13
+    when a resting $24 buy read as a $23 'bleed' and tripped the guard, while
+    the post-cancel report showed +$0.03. 4th instance of the value-that-left-
+    the-wallet-is-not-lost bug class; here the ledger is our own order state."""
+    ql = bl = 0.0
+    for side, o in ORDERS[pair].items():
+        if not o:
+            continue
+        rem = max(0.0, o["qty"] - o["filled"])
+        if side == "buy":
+            ql += rem * o["price"]
+        else:
+            bl += rem
+    return ql, bl
+
 def held_base(sp) -> float:
-    """TRUE base inventory: wallet + reserved in the pool by our resting sell.
-    Wallet-only reads made the R3 maker see a resting sell as lost inventory."""
-    return w.erc20_balance(sp["base"], sp["bdec"]) + pool_reserved(sp, sp["base"], sp["bdec"])
+    """TRUE base inventory: wallet + pool-withdrawable + locked in our resting
+    sells. Missing the last term made the maker under-count inventory while
+    sells rested and buy past its cap (held $63 against a $40 cap)."""
+    return (w.erc20_balance(sp["base"], sp["bdec"])
+            + pool_reserved(sp, sp["base"], sp["bdec"])
+            + locked_in_orders(sp["pair"])[1])
 
 def book(sp):
     ob = dex.get_orderbook(sp["pair"])
@@ -128,11 +149,13 @@ def book(sp):
     return {"bid": bid, "ask": ask, "mid": (bid + ask) / 2}
 
 def networth(mids: dict) -> float:
-    """TRUE capital in USDso terms: free quote + pool-reserved quote + base
-    inventory at mid + gas at SOMI price. The bleed guard gates on THIS."""
+    """TRUE capital in USDso terms: free quote + pool-reserved quote + quote
+    locked in our resting buys + base inventory at mid (incl. base locked in
+    resting sells, via held_base) + gas at SOMI price. The bleed guard gates
+    on THIS — every location value can sit in, or it cries wolf."""
     nw = wallet_usdso() + w.native_balance() * SOMI_PX
     for p, sp in SPECS.items():
-        nw += pool_reserved(sp, sp["quote"], sp["qdec"])
+        nw += pool_reserved(sp, sp["quote"], sp["qdec"]) + locked_in_orders(p)[0]
         b = held_base(sp)
         if b > 0 and mids.get(p):
             nw += b * mids[p]
