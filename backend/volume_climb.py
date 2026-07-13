@@ -180,7 +180,6 @@ if PREAPPROVE:
         ensure_allowance(sp["pool"], sp["base"],  sp["bdec"], TARGET_VOLUME / 1000.0)
 
 vol = 0.0; trips = 0; consec_fail = 0; _net_fails = 0
-wk_cur = week_idx(time.time()); wk_vol = 0.0   # Arena week window (Mon 00:00 UTC)
 _last_trade_ts = time.time()   # keepalive clock — reset on every successful trip
 from collections import deque
 # COST_CEIL_PER_1K is now a PRE-TRADE ceiling on the toll the live book implies
@@ -243,6 +242,8 @@ def week_idx(ts: float) -> int:
     """Contest week number. Weeks run Monday 00:00 UTC → Sunday 23:59 UTC; the
     unix epoch was a Thursday, so a 3-day shift Monday-aligns the boundary."""
     return int((ts + 3 * 86400) // 604800)
+
+wk_cur = week_idx(time.time()); wk_vol = 0.0   # Arena week window (Mon 00:00 UTC)
 
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", ""); TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG_MS = float(os.environ.get("CLIMB_TG_MILESTONE", "25000"))
