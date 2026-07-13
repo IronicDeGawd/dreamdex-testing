@@ -278,6 +278,8 @@
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Rolling cost</span><span id="s_cost">—</span></div>
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Uptime</span><span id="s_up">—</span></div>
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Target</span><span id="s_target">—</span></div>
+                    <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Run P&amp;L</span><span id="s_pnl">—</span></div>
+                    <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Gas used</span><span id="s_gas">—</span></div>
                 </div>
             </section>
 
@@ -571,6 +573,9 @@ function upfmt(s){ if(s==null) return "—"; s=Math.round(s); const h=Math.floor
   return (h?h+"h ":"")+(m||h?m+"m ":"")+ss+"s"; }
 
 // ── pollers ───────────────────────────────────────────────────────────
+// Run-P&L context shared between the status and balances pollers: the maker's
+// log has no live gas figure, so the balances poll derives it from the baseline.
+let _runBaseline=null, _runActive=false, _gasFromServer=false, _lastSomi=null;
 async function refreshStatus(){
   try{
     const s=await api("/status"); setConn(true,"CONNECTED");
@@ -582,6 +587,15 @@ async function refreshStatus(){
     $("s_cost").textContent = s.cost_per_1k!=null ? "$"+fmt(s.cost_per_1k,3)+"/1k" : "—";
     $("s_up").textContent = upfmt(s.uptime_s);
     $("s_target").textContent = s.params?.target ? "$"+fmt(s.params.target,0) : "—";
+    const pnl = s.final?.pnl ?? s.run_pnl;
+    $("s_pnl").textContent = pnl!=null ? ((pnl<0?"−$":"+$")+Math.abs(pnl).toFixed(4)) : "—";
+    $("s_pnl").className = pnl==null ? "" : (pnl<0 ? "text-warning" : "text-success");
+    const gas = s.final?.gas_somi ?? s.gas_used_somi;
+    if(gas!=null) $("s_gas").textContent = gas.toFixed(4)+" SOMI";
+    else if(!run) $("s_gas").textContent = "—";
+    else if(_lastSomi!=null && s.baseline?.somi!=null)   // maker mid-run: derive from balances poll
+      $("s_gas").textContent = (s.baseline.somi - _lastSomi).toFixed(4)+" SOMI";
+    _runBaseline=s.baseline; _runActive=run; _gasFromServer=(gas!=null);
     $("btnStop").disabled = !run;
     $("btnLaunch").disabled = run;
     $("lock-note").textContent = run ? "engine running — one at a time" : "";
@@ -590,6 +604,9 @@ async function refreshStatus(){
 async function refreshBalances(){
   try{
     const b=await api("/balances");
+    _lastSomi = b.somi ?? _lastSomi;
+    if(_runActive && !_gasFromServer && _runBaseline && _runBaseline.somi!=null && b.somi!=null)
+      $("s_gas").textContent = (_runBaseline.somi - b.somi).toFixed(4)+" SOMI";
     $("b_usdso").textContent="$"+fmt(b.usdso); $("b_vault").textContent="$"+fmt(b.usdso_vault);
     $("b_somi").textContent=fmt(b.somi,4);
     $("b_wbtc").textContent=fmt(b.wbtc,8); $("b_weth").textContent=fmt(b.weth,6);
