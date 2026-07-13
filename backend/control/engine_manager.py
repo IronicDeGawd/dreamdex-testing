@@ -51,6 +51,9 @@ _USDSO_RE    = re.compile(r"USDso=([0-9]+(?:\.[0-9]+)?)")
 _SOMI_RE     = re.compile(r"(?:SOMI|somi)=([0-9]+(?:\.[0-9]+)?)")
 _STOP_MK_RE  = re.compile(r"networth=\$([0-9]+(?:\.[0-9]+)?) bleed=\$([+-][0-9]+(?:\.[0-9]+)?) "
                           r"gas=(-?[0-9]+(?:\.[0-9]+)?) SOMI")
+# Locked-in round-trip profit (maker hb + STOP lines). run_pnl above is
+# mark-to-market and swings with held inventory; realized moves only on sells.
+_REALIZED_RE = re.compile(r"realized=([+-][0-9]+(?:\.[0-9]+)?)")
 
 MODES = ("steady", "fast", "maker")
 
@@ -361,7 +364,7 @@ class EngineManager:
                                 "somi": float(m.group(2))}
                     break
         out = {"baseline": baseline, "networth_now": None, "run_pnl": None,
-               "gas_used_somi": None, "final": st.get("final")}
+               "realized_pnl": None, "gas_used_somi": None, "final": st.get("final")}
         for line in reversed(tail):
             if mode == "maker":
                 m = _STOP_MK_RE.search(line)
@@ -369,11 +372,17 @@ class EngineManager:
                     out["networth_now"] = float(m.group(1))
                     out["run_pnl"] = -float(m.group(2))
                     out["gas_used_somi"] = float(m.group(3))
+                    r = _REALIZED_RE.search(line)
+                    if r:
+                        out["realized_pnl"] = float(r.group(1))
                     break
                 m = _HB_RE.search(line)
                 if m:   # heartbeat prints the signed delta vs its own start
                     out["networth_now"] = float(m.group(1))
                     out["run_pnl"] = float(m.group(2))
+                    r = _REALIZED_RE.search(line)
+                    if r:
+                        out["realized_pnl"] = float(r.group(1))
                     break
             elif mode == "steady":
                 m = _BLEED_ST_RE.search(line)
