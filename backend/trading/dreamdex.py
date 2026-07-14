@@ -127,9 +127,12 @@ class DreamDEX:
         # Domain must match the API server's registered domain (tested empirically)
         domain = urlparse(self.base_url).netloc  # e.g. stg.api.dreamdex.io or api.dreamdex.io
         now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # The address in the SIWE message MUST be the wallet that signs it —
+        # self.wallet may be an override (second wallet), while MY_ADDRESS is
+        # the config default. Mixing them = guaranteed invalid_signature.
         siwe_msg = (
             f"{domain} wants you to sign in with your Ethereum account:\n"
-            f"{MY_ADDRESS}\n\n"
+            f"{self.wallet.address}\n\n"
             f"Sign in to dreamDEX\n\n"
             f"URI: {self.base_url}\n"
             f"Version: 1\n"
@@ -253,12 +256,17 @@ class DreamDEX:
                 print(f"[DreamDEX] orderbook {path} err: {e}")
         return out
 
-    # ── Order simulation (eth_call, no gas) ───────────────────────────
+    # ── Order simulation (eth_call at the broadcast gas limit) ────────
 
-    def simulate_order_tx(self, tx: dict) -> tuple[bool, int, str]:
+    def simulate_order_tx(self, tx: dict, min_gas: int = 0) -> tuple[bool, int, str]:
         """Replay the prepared tx via eth_call before broadcasting.
         Docs (dreamdex-contracts.md): if returned success==false, do not
-        broadcast. Returns (success, orderId, raw_hex)."""
+        broadcast. Returns (success, orderId, raw_hex).
+
+        The eth_call runs with the SAME gas limit we will broadcast, so the
+        InsufficientGasForPayout guard (0x782b2567) shows up in the sim instead
+        of only on-chain — otherwise the node's ~50M default makes the sim pass
+        a limit the real 5M tx would fail on a deep sweep (DreamDEX docs §7a)."""
         from web3 import Web3
         try:
             call_obj = {
@@ -266,6 +274,7 @@ class DreamDEX:
                 "from":  Web3.to_checksum_address(self.wallet.address),
                 "data":  tx.get("data", "0x"),
                 "value": int(tx.get("value", 0)),
+                "gas":   self.wallet.order_gas_limit(tx, min_gas),
             }
             raw = self.wallet.w3.eth.call(call_obj)
             raw_hex = raw.hex() if hasattr(raw, "hex") else str(raw)
@@ -385,6 +394,9 @@ class DreamDEX:
                      "outputs": [{"name": "", "type": "bool"}]},
                     {"name": "decimals", "type": "function", "stateMutability": "view",
                      "inputs": [], "outputs": [{"name": "", "type": "uint8"}]},
+                    {"name": "allowance", "type": "function", "stateMutability": "view",
+                     "inputs": [{"name": "owner", "type": "address"}, {"name": "spender", "type": "address"}],
+                     "outputs": [{"name": "", "type": "uint256"}]},
                 ]
                 token_contract = self.wallet.w3.eth.contract(address=token_addr_checksum, abi=erc20_abi)
                 # Prefer the on-chain decimals(); fall back to MARKETS metadata
@@ -429,19 +441,32 @@ class DreamDEX:
                 from config import MARKETS
                 pool_addr = Web3.to_checksum_address(MARKETS[symbol]["contract"])
 
-                tx = token_contract.functions.approve(pool_addr, raw_amount).build_transaction({
-                    "from":  self.wallet.address,
-                    "nonce": self.wallet.reserve_nonce(),
-                    **self.wallet._gas_fields(),
-                })
-                from eth_account import Account
-                try:
-                    a_hash = self.wallet.sign_and_send(tx)
-                except Exception:
-                    self.wallet.reset_nonce()
-                    raise
-                self.wallet.wait_for_receipt(a_hash)
-                print(f"[DreamDEX] Approve confirmed: {a_hash}")
+                # The order pulls worst-case collateral at the LIMIT price, so an
+                # approve sized to the API's mid-notional can fall a hair short and
+                # revert (ERC20InsufficientAllowance). Two guards:
+                #  1) Never overwrite an already-sufficient allowance with a smaller
+                #     one — otherwise the big one-time startup pre-approve gets ground
+                #     down to the per-order size and ping-pongs at the edge every trip.
+                #  2) When we do approve, cover the order's worst case (raw_cap already
+                #     carries a 2x margin), never just the thin API amount.
+                need_raw = raw_cap if cap_human > 0 else raw_amount
+                approve_raw = max(raw_amount, need_raw)
+                current_allow = token_contract.functions.allowance(self.wallet.address, pool_addr).call()
+                if current_allow >= need_raw:
+                    print(f"[DreamDEX] allowance {current_allow} already covers {need_raw}; skipping approve")
+                else:
+                    tx = token_contract.functions.approve(pool_addr, approve_raw).build_transaction({
+                        "from":  self.wallet.address,
+                        "nonce": self.wallet.reserve_nonce(),
+                        **self.wallet._gas_fields(),
+                    })
+                    try:
+                        a_hash = self.wallet.sign_and_send(tx)
+                    except Exception:
+                        self.wallet.reset_nonce()
+                        raise
+                    self.wallet.wait_for_receipt(a_hash)
+                    print(f"[DreamDEX] Approve confirmed ({approve_raw}): {a_hash}")
 
             # Pre-flight eth_call simulation. Docs (dreamdex-contracts.md:183):
             # "Simulate first via eth_call. If success == false, do not broadcast."
@@ -450,7 +475,7 @@ class DreamDEX:
             if skip_sim:
                 print("[DreamDEX] sim skipped (skip_sim=True) — broadcasting direct")
             else:
-                sim_ok, sim_id, sim_raw = self.simulate_order_tx(resp)
+                sim_ok, sim_id, sim_raw = self.simulate_order_tx(resp, min_gas=gas_min)
                 print(f"[DreamDEX] eth_call sim: success={sim_ok} orderId={sim_id} raw={sim_raw[:80]}")
                 if not sim_ok:
                     return {"status": "would_revert", "sim_raw": sim_raw[:200]}
