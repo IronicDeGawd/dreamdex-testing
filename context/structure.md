@@ -12,6 +12,15 @@
 │   ├── direct_burst.py              # FAST taker engine — direct placeOrder(0x4e978373)
 │   │                                #   calldata, ~2x faster; encoding self-check, spread
 │   │                                #   gate, bag-proof (sell_all_weth each loop)
+│   ├── maker_core.py                # Maker V2 decision core — desired_quotes, stop_loss_action,
+│   │                                #   trend_mode, apply_fill, should_requote; 19 unit tests
+│   ├── maker_v2.py                  # Maker V2 engine — two-sided PostOnly loop on shared layer;
+│   │                                #   true capital tracking (wallet+reserved), bleed guard, fill
+│   │                                #   detection; env-driven (MAKER2_*); live-validated on R3
+│   ├── maker_feasibility.py         # Read-only feasibility probe for maker pairs; 160-sample
+│   │                                #   run with book snapshots, EMA yield oracle, candle analysis
+│   ├── tests/                       # Unit tests
+│   │   └── test_maker_core.py       # 19 tests for maker_core decision logic
 │   ├── cheap.sh                     # Launcher (steady): target, bleed_cap, leg, cost_ceil
 │   ├── direct_burst.sh              # Launcher (fast): target, leg, slip, spread_gate
 │   ├── control/                     # Engine-control API + dashboard (host-run FastAPI)
@@ -21,9 +30,13 @@
 │   │   ├── engine_manager.py        # Launch/stop/status/logs, single-engine lock,
 │   │   │                            #   log-tail volume parse, audit log, CONTROL_MOCK
 │   │   ├── mock_engine.py           # Fake engine (prints tot=$… lines) for local dev
-│   │   ├── run.sh                   # Host launcher: venv + uvicorn on 0.0.0.0:PORT
+│   │   ├── keepalive.sh             # Cron-triggered idle-DQ guard: buys $1 SOMI after
+│   │   │                            #   CONTROL_KEEPALIVE_AGE_S (default 20h) idle flat
+│   │   ├── transition.sh            # Cron-triggered 600k handover: /stop taker, /launch maker
+│   │   │                            #   at TRANSITION_TRIGGER volume; fires once via state marker
+│   │   ├── run.sh                   # Host launcher: venv + uvicorn on $CONTROL_BIND:$PORT
 │   │   ├── requirements.txt         # fastapi + uvicorn (on top of backend/requirements)
-│   │   └── state/                   # Runtime: engine.json, audit.log, logs/ (gitignored)
+│   │   └── state/                   # Runtime: engine.json, audit.log, keepalive.json, runs.jsonl (per-run P&L records), logs/
 │   ├── agent_v3/                    # Profit maker (Docker CMD = runner)
 │   │   ├── runner.py                # Entrypoint: threaded supervisor, multi-pair cycling
 │   │   ├── maker.py                 # Per-pair no-bleed PostOnly cycle + hold-mode trend gate
@@ -43,6 +56,7 @@
 │   │   ├── portfolio.py             # On-chain balance reader — reused by control /balances
 │   │   └── prices.py                # Price/book poller (dashboard + strategist)
 │   ├── static/index.html           # Engine-control dashboard (served by control/app.py)
+│   ├── static/r1.html              # Original R1 dashboard (layout-only design reference)
 │   ├── archive/                     # R1/R2 reference scripts incl. old server.py (DO NOT RUN)
 │   ├── config.py                    # MARKETS, SOMNIA_RPCS failover pool, thresholds, CHAIN_ID
 │   ├── docker-compose.yml           # Launches agent_v3.runner + agent_v3.monitor_bot
@@ -63,8 +77,8 @@
 ├── firmware/                        # ESP32-C3 watch (Arduino: watch.ino + diagnostics)
 ├── context/                         # Dev context (plans, research, progress) — tracked here
 │   ├── progress.md / progress.archive.md / handover.md
-│   ├── research/dreamdex.md, dreamdex-r3-findings.md
-│   └── plan/ (round2, round3-rules, dashboard, somnia-faucet-bot, …)
+│   ├── research/dreamdex.md, dreamdex-r3-findings.md, maker-feasibility-arena.md
+│   └── plan/ (algo-arena, r4-improvements, run-pnl-snapshot, round2, round3-rules, dashboard, …)
 └── README.md / .gitignore
 ```
 
@@ -82,5 +96,5 @@
   shells out to `cheap.sh`/`direct_burst.sh` — see `context/plan/dashboard.md`.
 - **Order placement:** REST `/orders` (volume_climb) OR direct `placeOrder`
   (0x4e978373, direct_burst). Native-SOMI pool ops need gas ≥5M; ERC20 fine at 3M.
-- **Secrets** in `backend/.env` only (gitignored). Repo is PUBLIC.
+- **Secrets** in `backend/.env` only (gitignored). Repo is PRIVATE (made private this session).
 - **Editing an engine** requires `docker compose build agent` (code baked into image).
