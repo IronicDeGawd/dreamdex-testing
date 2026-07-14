@@ -47,6 +47,9 @@ _HB_RE       = re.compile(r"hb networth=\$([0-9]+(?:\.[0-9]+)?) \(([+-][0-9]+(?:
 _START_MK_RE = re.compile(r"START networth=\$([0-9]+(?:\.[0-9]+)?) SOMI=([0-9]+(?:\.[0-9]+)?)")
 _START_ST_RE = re.compile(r"START USDso=([0-9]+(?:\.[0-9]+)?) .*SOMI=([0-9]+(?:\.[0-9]+)?)")
 _BLEED_ST_RE = re.compile(r"\(bleed \$(-?[0-9]+(?:\.[0-9]+)?)\)")
+# Atomic prints the bleed with an explicit sign, e.g. "(bleed $+1.5826)".
+_BLEED_AT_RE = re.compile(r"\(bleed \$([+-]?[0-9]+(?:\.[0-9]+)?)\)")
+_START_AT_RE = re.compile(r"START ATOMIC .*USDso=([0-9]+(?:\.[0-9]+)?) SOMI=([0-9]+(?:\.[0-9]+)?)")
 _USDSO_RE    = re.compile(r"USDso=([0-9]+(?:\.[0-9]+)?)")
 _SOMI_RE     = re.compile(r"(?:SOMI|somi)=([0-9]+(?:\.[0-9]+)?)")
 _STOP_MK_RE  = re.compile(r"networth=\$([0-9]+(?:\.[0-9]+)?) bleed=\$([+-][0-9]+(?:\.[0-9]+)?) "
@@ -195,7 +198,7 @@ class EngineManager:
             "ATOM_MAX_TOLL_PER_1K":  str(p.get("toll_cap", 0.30)),
             "ATOM_WEEKLY_TARGET":    str(p.get("weekly_target", 0)),
             "ATOM_MAX_USDSO_BLEED":  str(p.get("bleed_cap", 40)),
-            "ATOM_SOMI_FLOOR":       "3",
+            "ATOM_SOMI_FLOOR":       str(p.get("somi_floor", 3)),
             "ATOM_TX_MODE":          str(p.get("tx_mode", "type2")),
         }
         delegate = p.get("delegate")
@@ -391,10 +394,10 @@ class EngineManager:
         baseline = st.get("baseline")
         if not baseline:
             for line in self._head(st.get("log_path"), 40):
-                m = _START_MK_RE.search(line) or _START_ST_RE.search(line)
+                m = _START_MK_RE.search(line) or _START_ST_RE.search(line) or _START_AT_RE.search(line)
                 if m:
                     baseline = {"source": "log", "networth": float(m.group(1)),
-                                "somi": float(m.group(2))}
+                                "usdso": float(m.group(1)), "somi": float(m.group(2))}
                     break
         out = {"baseline": baseline, "networth_now": None, "run_pnl": None,
                "realized_pnl": None, "gas_used_somi": None, "final": st.get("final")}
@@ -419,6 +422,16 @@ class EngineManager:
                     break
             elif mode == "steady":
                 m = _BLEED_ST_RE.search(line)
+                if m:
+                    out["run_pnl"] = round(-float(m.group(1)), 4)
+                    s = _SOMI_RE.search(line)
+                    if s and baseline and baseline.get("somi") is not None:
+                        out["gas_used_somi"] = round(baseline["somi"] - float(s.group(1)), 4)
+                    break
+            elif mode == "atomic":
+                # Atomic trip/STOP lines print "(bleed $+X)" (USDso) + "SOMI=Z".
+                # The run ends flat, so USDso bleed is the run P&L (like steady).
+                m = _BLEED_AT_RE.search(line)
                 if m:
                     out["run_pnl"] = round(-float(m.group(1)), 4)
                     s = _SOMI_RE.search(line)

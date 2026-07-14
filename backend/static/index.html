@@ -283,8 +283,8 @@
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Rolling cost</span><span id="s_cost">—</span></div>
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Uptime</span><span id="s_up">—</span></div>
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Target</span><span id="s_target">—</span></div>
-                    <div class="table-row flex justify-between py-1.5"><span class="text-textMuted" title="mark-to-market: swings with held inventory">Run P&amp;L (mark)</span><span id="s_pnl">—</span></div>
-                    <div class="table-row flex justify-between py-1.5"><span class="text-textMuted" title="locked-in round-trip profit — only moves when a sell fills">Realized P&amp;L</span><span id="s_real">—</span></div>
+                    <div class="table-row flex justify-between py-1.5"><span id="s_pnllabel" class="text-textMuted" title="the run's profit/loss vs its launch baseline">Run P&amp;L</span><span id="s_pnl">—</span></div>
+                    <div id="row_real" class="table-row flex justify-between py-1.5 hidden"><span class="text-textMuted" title="locked-in round-trip profit — only moves when a sell fills (maker holds inventory, so this differs from the mark)">Realized P&amp;L</span><span id="s_real">—</span></div>
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Gas used</span><span id="s_gas">—</span></div>
                 </div>
             </section>
@@ -602,6 +602,11 @@ async function refreshStatus(){
     const pnl = s.final?.pnl ?? s.run_pnl;
     $("s_pnl").textContent = pnl!=null ? ((pnl<0?"−$":"+$")+Math.abs(pnl).toFixed(4)) : "—";
     $("s_pnl").className = pnl==null ? "" : (pnl<0 ? "text-warning" : "text-success");
+    // Only the maker holds inventory, so only it has a mark-vs-realized split.
+    // Takers end each trip flat — their Run P&L is already realized.
+    const isMaker = s.mode==="maker";
+    $("s_pnllabel").textContent = isMaker ? "Run P&L (mark)" : "Run P&L";
+    $("row_real").classList.toggle("hidden", !isMaker);
     const rp = s.realized_pnl;
     $("s_real").textContent = rp!=null ? ((rp<0?"−$":"+$")+Math.abs(rp).toFixed(4)) : "—";
     $("s_real").className = rp==null ? "" : (rp<0 ? "text-warning" : "text-success");
