@@ -219,3 +219,86 @@ class SomniaWallet:
         )
         raw = contract.functions.balanceOf(self.address).call()
         return raw / (10 ** decimals)
+
+    # ── EIP-7702 (type-4 set-code) helpers ────────────────────────────
+    # Used by the atomic round-trip mode: the wallet delegates to a small
+    # contract (backend/contracts/RoundTrip7702.sol) so an IOC buy + IOC sell
+    # settle in one tx. Somnia enforces a ~1.19M-gas intrinsic floor on type-4
+    # txs — a lower gas limit is rejected as `invalid transaction` — so the
+    # default 6M matches what works live (and what the reference delegate uses).
+    _ZERO_ADDR = "0x0000000000000000000000000000000000000000"
+
+    def _fees_1559(self) -> dict:
+        """Type-4 requires EIP-1559 fee fields. Prefer the node's base fee;
+        fall back to gasPrice-derived caps (priority 0, proven live)."""
+        f = self._gas_fields()
+        if "maxFeePerGas" in f:
+            return f
+        gp = self.w3.eth.gas_price
+        return {"maxFeePerGas": int(gp * 2), "maxPriorityFeePerGas": 0}
+
+    def sign_authorization(self, delegate: str, auth_nonce: int):
+        """Sign an EIP-7702 authorization delegating this EOA's code to
+        `delegate` (or the zero address to clear). For a self-sponsored type-4
+        tx the auth nonce is the TX nonce + 1 (the auth is validated after the
+        tx's own nonce has incremented) — the caller must pass that."""
+        acct = Account.from_key(self.private_key)
+        return acct.sign_authorization({
+            "chainId": self.chain_id,
+            "address": Web3.to_checksum_address(delegate),
+            "nonce":   int(auth_nonce),
+        })
+
+    def send_type4_tx(self, to: str, data: str, auth, gas: int = 6_000_000,
+                      tx_nonce: int | None = None) -> str:
+        """Broadcast a type-4 (set-code) tx carrying one authorization. Returns
+        the tx hash. Pass tx_nonce when the auth was signed against a specific
+        nonce (install/clear); otherwise a fresh nonce is reserved."""
+        n = tx_nonce if tx_nonce is not None else self.reserve_nonce()
+        tx_fields = {
+            "type":              4,
+            "to":                Web3.to_checksum_address(to),
+            "data":              data or "0x",
+            "value":             0,
+            "gas":               int(gas),
+            "nonce":             n,
+            "chainId":           self.chain_id,
+            "authorizationList": [auth],
+            **self._fees_1559(),
+        }
+        signed = Account.sign_transaction(tx_fields, self.private_key)
+        sent = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+        h = sent.hex()
+        return h if h.startswith("0x") else f"0x{h}"
+
+    def delegation_target(self):
+        """Return the address this EOA is 7702-delegated to (parsed from the
+        ef0100||address code designator), or None if not delegated."""
+        code = self.w3.eth.get_code(self.address)
+        h = code.hex()
+        h = h[2:] if h.startswith("0x") else h
+        if h.startswith("ef0100") and len(h) == 46:
+            return Web3.to_checksum_address("0x" + h[6:])
+        return None
+
+    def install_delegation(self, delegate: str, gas: int = 6_000_000):
+        """Point this EOA's code at `delegate` (one type-4 tx). Resyncs the
+        nonce before and after so subsequent trade txs don't race. Returns
+        (tx_hash, receipt)."""
+        self.reset_nonce()
+        n = self.reserve_nonce()
+        auth = self.sign_authorization(delegate, n + 1)
+        h = self.send_type4_tx(self.address, "0x", auth, gas=gas, tx_nonce=n)
+        r = self.wait_for_receipt(h, timeout=90)
+        self.reset_nonce()
+        return h, r
+
+    def clear_delegation(self, gas: int = 6_000_000):
+        """Remove this EOA's 7702 delegation (authorize the zero address)."""
+        self.reset_nonce()
+        n = self.reserve_nonce()
+        auth = self.sign_authorization(self._ZERO_ADDR, n + 1)
+        h = self.send_type4_tx(self.address, "0x", auth, gas=gas, tx_nonce=n)
+        r = self.wait_for_receipt(h, timeout=90)
+        self.reset_nonce()
+        return h, r
