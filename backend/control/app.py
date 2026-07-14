@@ -370,6 +370,7 @@ class LaunchBody(BaseModel):
     toll_cap: float | None = None   # atomic only — max net quote lost per $1k
     tx_mode: str | None = None      # atomic only — "type2" (default) | "type4"
     delegate: str | None = None     # atomic only — override RoundTrip7702 address
+    somi_floor: float | None = None  # atomic — stop below this SOMI (default 3)
 
 
 class BoostsBody(BaseModel):
@@ -504,7 +505,7 @@ def set_boosts(body: BoostsBody, _=Depends(require_key)):
 def launch(body: LaunchBody, _=Depends(require_key)):
     params = {"target": body.target, "leg": body.leg}
     for k in ("pair", "slip", "bleed_cap", "cost_ceil", "spread_gate", "weekly_target",
-              "cap", "inv_floor", "toll_cap", "tx_mode", "delegate"):
+              "cap", "inv_floor", "toll_cap", "tx_mode", "delegate", "somi_floor"):
         v = getattr(body, k)
         if v is not None:
             params[k] = v
