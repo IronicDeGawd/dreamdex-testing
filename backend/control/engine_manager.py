@@ -55,7 +55,7 @@ _STOP_MK_RE  = re.compile(r"networth=\$([0-9]+(?:\.[0-9]+)?) bleed=\$([+-][0-9]+
 # mark-to-market and swings with held inventory; realized moves only on sells.
 _REALIZED_RE = re.compile(r"realized=([+-][0-9]+(?:\.[0-9]+)?)")
 
-MODES = ("steady", "fast", "maker")
+MODES = ("steady", "fast", "maker", "atomic")
 
 
 class EngineError(Exception):
@@ -179,6 +179,31 @@ class EngineManager:
             "MAKER2_SOMI_FLOOR":     "3",
         }
 
+    def _atomic_env(self, p: dict) -> dict:
+        # EIP-7702 atomic buy+sell round-trip (atomic_round.py). Delegates the
+        # wallet to RoundTrip7702 and does both legs in one tx. Single pair only
+        # (like fast). toll_cap = max net quote lost per $1k of round-trip volume.
+        env = {
+            "ATOM_PAIR":            str(p.get("pair", "WETH:USDso")),
+            "ATOM_TARGET":          str(p["target"]),
+            "ATOM_LEG_USD":         str(p["leg"]),
+            "ATOM_SLIP":            str(p.get("slip", 0.004)),
+            "ATOM_SPREAD_GATE_PCT": str(p.get("spread_gate", 0.15)),
+            "ATOM_MAX_TOLL_PER_1K": str(p.get("toll_cap", 0.30)),
+            "ATOM_SOMI_FLOOR":      "3",
+            "ATOM_TX_MODE":         str(p.get("tx_mode", "type2")),
+        }
+        delegate = p.get("delegate")
+        if not delegate:
+            try:
+                import config
+                delegate = getattr(config, "ROUNDTRIP_DELEGATE", "")
+            except Exception:
+                delegate = ""
+        if delegate:
+            env["ATOM_DELEGATE_ADDR"] = str(delegate)
+        return env
+
     def _build_command(self, mode: str, params: dict):
         """Returns (argv, engine_env) for the chosen mode."""
         if mode == "steady":
@@ -187,6 +212,9 @@ class EngineManager:
         elif mode == "maker":
             engine_env = self._maker_env(params)
             script = "maker_v2.py"
+        elif mode == "atomic":
+            engine_env = self._atomic_env(params)
+            script = "atomic_round.py"
         else:
             engine_env = self._fast_env(params)
             script = "direct_burst.py"
