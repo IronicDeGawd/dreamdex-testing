@@ -181,17 +181,22 @@ class EngineManager:
 
     def _atomic_env(self, p: dict) -> dict:
         # EIP-7702 atomic buy+sell round-trip (atomic_round.py). Delegates the
-        # wallet to RoundTrip7702 and does both legs in one tx. Single pair only
-        # (like fast). toll_cap = max net quote lost per $1k of round-trip volume.
+        # wallet to RoundTrip7702 and does both legs in one tx. Multi-pair like
+        # steady: rotates to the cheapest book (boost-aware). toll_cap = on-chain
+        # max net quote lost per $1k of round-trip volume; cost_ceil = pre-trade
+        # book-implied toll gate (pause when a book is dearer than this).
         env = {
-            "ATOM_PAIR":            str(p.get("pair", "WETH:USDso")),
-            "ATOM_TARGET":          str(p["target"]),
-            "ATOM_LEG_USD":         str(p["leg"]),
-            "ATOM_SLIP":            str(p.get("slip", 0.004)),
-            "ATOM_SPREAD_GATE_PCT": str(p.get("spread_gate", 0.15)),
-            "ATOM_MAX_TOLL_PER_1K": str(p.get("toll_cap", 0.30)),
-            "ATOM_SOMI_FLOOR":      "3",
-            "ATOM_TX_MODE":         str(p.get("tx_mode", "type2")),
+            "ATOM_PAIRS":            str(p.get("pair", "WETH:USDso")),  # comma list = rotate
+            "ATOM_TARGET":           str(p["target"]),
+            "ATOM_LEG_USD":          str(p["leg"]),
+            "ATOM_SLIP":             str(p.get("slip", 0.004)),
+            "ATOM_SPREAD_GATE_PCT":  str(p.get("spread_gate", 0.15)),
+            "ATOM_COST_CEIL_PER_1K": str(p.get("cost_ceil", 0)),
+            "ATOM_MAX_TOLL_PER_1K":  str(p.get("toll_cap", 0.30)),
+            "ATOM_WEEKLY_TARGET":    str(p.get("weekly_target", 0)),
+            "ATOM_MAX_USDSO_BLEED":  str(p.get("bleed_cap", 40)),
+            "ATOM_SOMI_FLOOR":       "3",
+            "ATOM_TX_MODE":          str(p.get("tx_mode", "type2")),
         }
         delegate = p.get("delegate")
         if not delegate:
