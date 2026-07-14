@@ -210,6 +210,7 @@
                             <button class="btn-base border-none px-3 py-1 text-sm btn-active" data-mode="steady" onclick="setMode('steady')" title="Cost-aware REST round-trips. Pauses on wide spread / high $-per-1k.">STEADY · volume_climb</button>
                             <button class="btn-base border-none border-l border-border px-3 py-1 text-sm" data-mode="fast" onclick="setMode('fast')" title="Direct placeOrder calldata, ~2× faster. Max throughput.">FAST · direct_burst</button>
                             <button class="btn-base border-none border-l border-border px-3 py-1 text-sm" data-mode="maker" onclick="setMode('maker')" title="Two-sided PostOnly quotes — earns the spread, near-zero bleed. Volume limited by real flow. Target 0 = run until stopped.">MAKER · maker_v2</button>
+                            <button class="btn-base border-none border-l border-border px-3 py-1 text-sm" data-mode="atomic" onclick="setMode('atomic')" title="EIP-7702 buy+sell in ONE tx — no drift, no bag, ~3× gas-efficient. R4 only (Arena fair-play poison). One pair.">ATOMIC · 7702</button>
                         </div>
                     </div>
                     <p id="mode-help" class="text-xs text-textMuted flex-1 min-w-[200px] leading-snug"></p>
@@ -248,6 +249,10 @@
                     <div class="flex flex-col gap-1 mode-steady">
                         <label class="text-xs text-textMuted uppercase">Cost ceil $/1k</label>
                         <input id="f_cost" type="number" step="0.01" class="input-base w-24" value="0.15">
+                    </div>
+                    <div class="flex flex-col gap-1 mode-atomic hidden">
+                        <label class="text-xs text-textMuted uppercase">Toll cap $/1k</label>
+                        <input id="f_toll" type="number" step="0.01" class="input-base w-24" value="0.30" title="max net quote lost per $1k of round-trip volume; a trip that would exceed it reverts on-chain">
                     </div>
                     <div class="flex flex-col gap-1">
                         <label class="text-xs text-textMuted uppercase">Spread gate %</label>
@@ -491,18 +496,19 @@ const HELP = {
   steady:"Cost-aware REST round-trips. Pauses on wide spread / high $-per-1k. Best for holding a lead.",
   fast:"Direct placeOrder calldata, ~2× faster. Max throughput for closing a gap. Bag-proof.",
   maker:"Two-sided PostOnly quotes — earns the spread, near-zero bleed. Volume limited by real flow. Target 0 = run until stopped.",
+  atomic:"EIP-7702 buy+sell in ONE tx — no inter-leg drift, no bag, on-chain toll cap, ~3× gas-efficient. R4 only (Arena flags atomic round-trips). One pair; installs a wallet delegation on first launch.",
 };
 function setMode(m){
   MODE=m;
   document.querySelectorAll("#mode-group button").forEach(b=>b.classList.toggle("btn-active", b.dataset.mode===m));
   $("mode-help").textContent = HELP[m];
   // an element can carry several mode-* classes; show it if it has the current one
-  document.querySelectorAll(".mode-steady,.mode-fast,.mode-maker").forEach(e=>
+  document.querySelectorAll(".mode-steady,.mode-fast,.mode-maker,.mode-atomic").forEach(e=>
     e.classList.toggle("hidden", !e.classList.contains("mode-"+m)));
   $("f_slip").placeholder = m==="steady" ? "0.003" : "0.004";
   $("f_gate").placeholder = m==="steady" ? "0.05" : "0.15";
-  // FAST runs one pair (DP_PAIR is single) — trim a multi-selection to its first.
-  if(m==="fast"){
+  // FAST and ATOMIC run one pair — trim a multi-selection to its first.
+  if(m==="fast" || m==="atomic"){
     document.querySelectorAll("#pair-group .btn-active").forEach((b,i)=>{
       if(i>0) b.classList.remove("btn-active");
     });
@@ -512,7 +518,7 @@ function selectedPairs(){
   return [...document.querySelectorAll("#pair-group .btn-active")].map(b=>b.dataset.pair);
 }
 function togglePair(btn){
-  if(MODE==="fast"){  // radio behaviour — FAST takes exactly one pair
+  if(MODE==="fast" || MODE==="atomic"){  // radio behaviour — one pair only
     document.querySelectorAll("#pair-group button").forEach(b=>b.classList.toggle("btn-active", b===btn));
   } else {
     btn.classList.toggle("btn-active");
@@ -530,12 +536,13 @@ function launchBody(){
   if($("f_gate").value) b.spread_gate=+$("f_gate").value;
   if(MODE==="steady"){ b.bleed_cap=+$("f_bleed").value; b.cost_ceil=+$("f_cost").value; }
   if(MODE==="maker"){ b.bleed_cap=+$("f_bleed").value; b.cap=+$("f_cap").value; }
+  if(MODE==="atomic"){ if($("f_toll").value) b.toll_cap=+$("f_toll").value; }
   return b;
 }
 function confirmLaunch(){
   const pairs = selectedPairs();
   if(!pairs.length){ toast("✗ select at least one pair"); return; }
-  if(MODE==="fast" && pairs.length>1){ toast("✗ FAST takes exactly one pair"); return; }
+  if((MODE==="fast"||MODE==="atomic") && pairs.length>1){ toast("✗ "+MODE.toUpperCase()+" takes exactly one pair"); return; }
   const b=launchBody();
   modal("Launch "+MODE+" run",
     `${pairs.map(p=>p.split(":")[0]).join(" + ")} · target $${b.target.toLocaleString()}, leg $${b.leg}. This spends real capital. Proceed?`,

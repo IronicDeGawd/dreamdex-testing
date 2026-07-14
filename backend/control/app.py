@@ -356,17 +356,20 @@ def require_key(x_api_key: str = Header(default="")):
 
 
 class LaunchBody(BaseModel):
-    mode: str                       # "steady" | "fast" | "maker"
+    mode: str                       # "steady" | "fast" | "maker" | "atomic"
     target: float
     leg: float
     pair: str | None = None         # e.g. WBTC:USDso (default WETH:USDso)
     slip: float | None = None
     bleed_cap: float | None = None  # steady + maker
     cost_ceil: float | None = None  # steady only
-    spread_gate: float | None = None  # steady + fast
+    spread_gate: float | None = None  # steady + fast + atomic
     weekly_target: float | None = None  # steady only — Arena weekly volume cap
     cap: float | None = None        # maker only — per-pair inventory cap ($)
     inv_floor: float | None = None  # maker only — standing-inventory fraction of cap
+    toll_cap: float | None = None   # atomic only — max net quote lost per $1k
+    tx_mode: str | None = None      # atomic only — "type2" (default) | "type4"
+    delegate: str | None = None     # atomic only — override RoundTrip7702 address
 
 
 class BoostsBody(BaseModel):
@@ -501,7 +504,7 @@ def set_boosts(body: BoostsBody, _=Depends(require_key)):
 def launch(body: LaunchBody, _=Depends(require_key)):
     params = {"target": body.target, "leg": body.leg}
     for k in ("pair", "slip", "bleed_cap", "cost_ceil", "spread_gate", "weekly_target",
-              "cap", "inv_floor"):
+              "cap", "inv_floor", "toll_cap", "tx_mode", "delegate"):
         v = getattr(body, k)
         if v is not None:
             params[k] = v
