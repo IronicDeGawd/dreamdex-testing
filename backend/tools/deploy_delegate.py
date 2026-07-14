@@ -29,9 +29,12 @@ print(f"deployer {acct.address} chain {config.CHAIN_ID} "
       f"gas {w3.eth.get_balance(acct.address)/1e18:.4f}")
 
 gp = w3.eth.gas_price
+# Somnia's gas accounting runs high (ERC20 ~2M, orders ~5M vs mainnet norms), so
+# a contract deploy needs far more than a standard chain — 800k ran out of gas.
+deploy_gas = int(os.environ.get("DEPLOY_GAS", "3000000"))
 tx = {
     "from": acct.address, "nonce": w3.eth.get_transaction_count(acct.address, "pending"),
-    "data": ROUNDTRIP_INITCODE, "value": 0, "gas": 800_000,
+    "data": ROUNDTRIP_INITCODE, "value": 0, "gas": deploy_gas,
     "maxFeePerGas": int(gp * 2), "maxPriorityFeePerGas": 0, "chainId": config.CHAIN_ID,
 }
 h = w3.eth.send_raw_transaction(Account.sign_transaction(tx, key).raw_transaction)
