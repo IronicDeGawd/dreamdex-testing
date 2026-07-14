@@ -154,6 +154,10 @@ if ENV == "mainnet":
     DREAMDEX_HTTP = "https://api.dreamdex.io"
     DREAMDEX_WS   = "wss://api.dreamdex.io/v0/ws/public"
 
+    # RoundTrip7702 delegate for the atomic mode (deployed in Phase 3). Empty
+    # until deployed; atomic_round.py takes ATOM_DELEGATE_ADDR anyway.
+    ROUNDTRIP_DELEGATE = os.environ.get("ROUNDTRIP_DELEGATE", "")
+
     # R4 fresh wallet (zero-TX, registered). Override via WALLET_ADDRESS if rotated.
     MY_ADDRESS  = os.environ.get("WALLET_ADDRESS", "0x703e10344158d7C6CB943596328211a0a22422F6")
     PRIVATE_KEY = os.environ.get("MAINNET_PRIVATE_KEY", "")    # export MAINNET_PRIVATE_KEY=0x...
@@ -218,6 +222,10 @@ else:
 
     # USDso on testnet (confirmed from sandbox scripts)
     USDSO_TESTNET = "0x9c32F3827A1a99f0cf9B213de8b53eC3d57bb171"
+
+    # RoundTrip7702 delegate deployed on testnet (Phase 2 mechanics validation).
+    ROUNDTRIP_DELEGATE = os.environ.get(
+        "ROUNDTRIP_DELEGATE", "0x447121E7D1ff9bFD142391d2161C192C99491461")
 
     # Testnet has 3 pairs only (no USDC.e)
     MARKETS = {
