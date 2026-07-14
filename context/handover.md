@@ -1,50 +1,65 @@
-# Handover — auto-generated 2026-06-30 21:17
+# Handover — auto-generated 2026-07-13 16:25
 
 > Git facts written by pre-compact-handover.sh. Session Notes are Claude-owned.
 > See context/progress.md and context/structure.md for full state.
 
 ## Branch
-feature/profit-maker-agent
+feature/maker-v2
 
 ## Files In Flight
 ```
+ M context/dreamdex-native-pool-revert-bug.docx
+ M context/dreamdex-taker-revert-bug.docx
+ M context/dreamdex-taker-revert-bug.md
  M context/handover.md
+ M context/plan/algo-arena.md
+ M context/plan/dashboard.md
+ M context/plan/round2.md
+ M context/plan/round3-rules.md
+ M context/plan/somnia-faucet-bot.md
+ M context/progress.archive.md
  M context/progress.md
+ M context/research/dreamdex-r3-findings.md
+ M context/research/dreamdex.md
+ M context/research/maker-feasibility-arena.md
  M context/structure.md
-?? context/plan/maker-hold-engine.md
-?? context/plan/r3-volume-climb.md
+?? context/plan/r4-improvements.md
+?? context/plan/run-pnl-snapshot.md
+?? kit-fix/
 ```
 
 ## Recent Commits
 ```
-b7e04bc fix(volume_climb): honest pause/resume — keep cost window, resume only under ceil
-766c8ce feat(volume_climb): Telegram pings for milestones, pause, resume, stop
-965c073 feat(volume_climb): cost-aware mode — spread gate + rolling $/1k pause
-58dd646 feat(config): env-overridable ELIGIBLE_PAIRS + alloc fallback
-2b6b45c fix(maker): gap-safe trend signal; hold-mode supersedes legacy DB guard
+33f23d5 feat(dashboard): run P&L and gas-used rows in Live Status
+a28fc14 feat(control): per-run capital+gas baseline with P&L verdict and run history
+d30f43d fix(maker): count funds locked in our resting orders as capital
+faddd72 feat(control): maker as a first-class engine mode + one-shot 600k handover
+cb1fa04 docs(plan): Arena fair-play detection rules + operator-key wallet architecture
 ```
 
 ## Session Notes
-**🟢 WEEK 2 LIVE — RAW VOLUME ONLY (dev rule change).** Week-1 snapshot taken; week 2 ignores PnL/multiplier — only actual raw volume counts. No more fund/gas support → FIXED budget. Contest ends **~2026-07-07 21:00 IST**. We are **trader-2, #1, raw ~200k**. Wallet flat **~125 USDso + 51 SOMI ≈ $130** (TEAM capital, not personal → toll is not a loss; only thing that matters is keeping enough to keep trading).
+**🔴 R4 LIVE — RANK #1/9, MAKER trading real money.** Vol 601.5k, lead +64.9k (#2 adding ~4-5k/h — watch their burn, they have no top-ups). Maker run 3: leg $40 ±15%, cap $55, bleed $3, WETH, log `maker-1783933035.log`, START networth $78.1742. realized +$0.0021, mark −$0.22 (unrealized inventory). **⚠️ ENDGAME: /stop maker (flattens) BEFORE final snapshot.** User will start taker later themselves — maker runs until then.
 
-### Active task
-`cheap.sh 400000 40` running on server (cost-aware middle-phase volume). Plan: cost-aware churn next 2–4 days → `burst.sh` full-throttle the final 2 days. ~$90 reserved for the final burst.
+### CRITICAL corrections this session
+- **R4 milestones use RAW volume, NOT effective** (user-corrected; "effective" was an R3 rule wrongly carried into notes). 601.5k raw ⇒ 500k milestone passed; next $25 at 1M raw (~$50 taker burn at $0.12/1k).
+- **~/Project/Somniaforge was DELETED mid-session and restored from a 2-day-old snapshot.** Server files were current → rsynced back + re-committed. Lost: old git hashes (dbfa94a, 5219f57, 61c7c38, 49564a7, 96d1466 → now d30f43d, a28fc14, 33f23d5). Both branches PUSHED to private origin (user approved).
 
-### Engines (all committed + on server, baked into image)
-- **`backend/volume_climb.py`** — taker WETH round-trip churn, ~100% fill, $50 legs, auto-flatten-on-stop, RPC-blip resilient. Cost-aware mode: `CLIMB_SPREAD_GATE_PCT` skips wide-spread trips; `CLIMB_COST_CEIL_PER_1K` pauses when rolling $/1k > ceil (window NOT cleared; resume only when cost back under ceil). Telegram pings (start/milestone every `CLIMB_TG_MILESTONE`/pause/resume/stop) via `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` (in server .env).
-- **`backend/cheap.sh [target] [bleed_cap]`** — cost-aware launcher (spread-gate 0.05%, cost-ceil $0.15/1k).
-- **`backend/burst.sh [target]`** — full-throttle (cost knobs off). Final-2-day weapon.
+### Run P&L feature (built+deployed today, plan context/plan/run-pnl-snapshot.md)
+- /launch + /autorestart snapshot capital+gas → `baseline` in engine.json; /status parses live run_pnl/gas from engine logs (START-line fallback for old runs); /stop + self-stop observer (30s grace) write final verdict + one record/run to control/state/runs.jsonl; dashboard Live Status has Run P&L + Gas rows.
+- **/cohort now counts order-locked funds via account-keyed get_open_orders (5th instance of the locked-funds class)** — was showing balance $33 / $0.194 per 1k; true $75.8 / $0.123.
 
-### Deploy / control (server irony@100.80.130.21, ~/dreamdex-r3/backend)
-- SSH: `ssh -o ControlPath=none -o ConnectTimeout=30 -o BatchMode=yes irony@100.80.130.21 '<cmd>'`
-- Code lives in the IMAGE → after editing volume_climb.py: scp to host THEN `docker compose build agent` (else `/app/volume_climb.py` is stale).
-- Launchers run detached (survive SSH drop). `--rm` wipes logs on exit → confirm result on-chain + leaderboard, not the log.
-- Monitor running run: `docker logs --tail N backend-agent-run-<id>`. Stop: `docker stop <id>` (may leave a bag if mid-trip → re-run flatten, but stop() auto-flattens on clean stop).
+### Ops (unchanged core)
+- Maker launch: POST /launch `{"mode":"maker","target":0,"leg":40,"pair":"WETH:USDso","bleed_cap":3,"cap":55,"inv_floor":0}`; engine code baked in image (`docker compose build agent` safe while running).
+- Crons: watchdog */15, keepalive 17 * * * *, transition */10 (inert, marker set). Control restart: kill by PORT (`kill $(lsof -ti :8787)`), never pkill by name; `nohup ./control/run.sh 8787 > /tmp/control.log 2>&1 &`; LiveBackend boot ~15-20s.
+- pkill on server: bracket pattern `pkill -f "[m]aker_v2"`. ssh rapid reconnects → 255 rate-limit, cool down.
 
 ### Gotchas
-- Realized round-trip cost = spread + DRIFT-between-legs; drift is unpredictable → cost-ceil is reactive (throttles sustained-expensive, can't pre-empt one drift-expensive trip). Spread-gate is the only pre-trade preventer.
-- WETH spread ~0.02% = ~$0.10/1k toll FLOOR (can't beat it on taker); market currently choppy, sometimes NEGATIVE cost (profitable).
-- Effective-volume MILESTONE ($25/500k) needs PnL>0 (maker, two-way market) — unreachable by churn (peaks ~400-423k eff). Week 2 makes this moot (raw only).
-- Leaderboard `-new` URL is live R3; `-super-cool` is frozen R2. Gas via USDso→SOMI (no team support wk2).
-- DQ rule (>24h idle) appears NOT strictly enforced (we idled ~2d, stayed listed) — don't rely on it; keep trading.
-- Rivals: trader-3 192k raw but capital-poor (coiled spring if market pumps); trader-1 #2 active; trader-4 dead (76 tx); trader-5 inefficient ($2.8/tx). We're most efficient ($11/tx, 69% fill).
+- Order-locked funds invisible to every balance read — ANY balance-derived metric must add them (engine: own state; control: open-orders API).
+- Local repo restored from stale snapshot: docx/context mode-changes cleaned via `git checkout -- . ":(exclude)context"`; context/ deliberately kept from working copies.
+- Maker rate baseline (run 3, leg $40): START $78.1742 @ ~07:37 UTC; ~$140-180/h vol, ~$0.17/1k realized blended, gas ~$0.11/day → 9-day projection +$22-43k vol, +$2-5 profit.
+- kit-fix/ untracked — user remove-or-gitignore decision still pending.
+
+### Open
+- Maker 24-48h profitability verdict vs $78.1742.
+- User starts taker later (raw-vol push toward 1M); maker+taker must never share a pair (self-cross).
+- Arena registration → G1 attribution test → operator plumbing.
