@@ -154,9 +154,11 @@ if ENV == "mainnet":
     DREAMDEX_HTTP = "https://api.dreamdex.io"
     DREAMDEX_WS   = "wss://api.dreamdex.io/v0/ws/public"
 
-    # RoundTrip7702 delegate for the atomic mode (deployed in Phase 3). Empty
-    # until deployed; atomic_round.py takes ATOM_DELEGATE_ADDR anyway.
-    ROUNDTRIP_DELEGATE = os.environ.get("ROUNDTRIP_DELEGATE", "")
+    # RoundTrip7702 delegate for the atomic mode. Deployed + smoke-validated on
+    # mainnet from the R3 wallet (Phase 3); the same bytecode works for any
+    # wallet that delegates to it. atomic_round.py takes ATOM_DELEGATE_ADDR too.
+    ROUNDTRIP_DELEGATE = os.environ.get(
+        "ROUNDTRIP_DELEGATE", "0xe504aC9a272d4975D3E074ab034f64f68CdBC18c")
 
     # R4 fresh wallet (zero-TX, registered). Override via WALLET_ADDRESS if rotated.
     MY_ADDRESS  = os.environ.get("WALLET_ADDRESS", "0x703e10344158d7C6CB943596328211a0a22422F6")
