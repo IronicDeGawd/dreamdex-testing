@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import hmac
+import json
 import time as _time
 
 from fastapi import FastAPI, Header, HTTPException, Depends, Request
@@ -33,11 +34,29 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from control.engine_manager import EngineManager, EngineError, MOCK
+from control.engine_manager import EngineManager, EngineError, MOCK, STATE_DIR
 
 # R4 rule 5: eligible pairs ONLY. USDC.e:USDso is a STABLECOIN pair and must never
 # be traded (removal risk). Enforced at /launch and /trade so it can't be entered.
 ELIGIBLE_PAIRS = {"WBTC:USDso", "WETH:USDso", "SOMI:USDso"}
+
+# Idle-DQ keepalive (contest rule: >24h without a trade = DQ). A cron hits
+# POST /keepalive hourly; we act only when lifetime volume hasn't moved for
+# KEEPALIVE_AGE_S. 20h + hourly cron ⇒ worst-case trade at ~21h idle, inside 24h.
+KEEPALIVE_AGE_S = float(os.environ.get("CONTROL_KEEPALIVE_AGE_S", 20 * 3600))
+KEEPALIVE_USDSO = float(os.environ.get("CONTROL_KEEPALIVE_USDSO", 1.0))
+KEEPALIVE_FILE = STATE_DIR / "keepalive.json"
+
+def _keepalive_state() -> dict:
+    try:
+        return json.loads(KEEPALIVE_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+
+def _save_keepalive_state(st: dict) -> None:
+    tmp = KEEPALIVE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st))
+    tmp.replace(KEEPALIVE_FILE)
 
 # Simple per-IP brute-force limiter for /login (no external dep).
 _login_fails: dict = {}
@@ -61,6 +80,11 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR  = BACKEND_DIR / "static"
 INDEX_HTML  = STATIC_DIR / "index.html"
 R1_HTML     = STATIC_DIR / "r1.html"   # the original R1 dashboard, served for design reference
+# Arena pair boosts (weekly 1.2–1.5× score multipliers, announced manually each
+# Monday). POST /boosts writes data/boosts.json; ./data is volume-mounted into
+# the engine container, and volume_climb re-reads it every ~60s — so a Monday
+# update reaches a RUNNING engine without a restart.
+BOOSTS_FILE = BACKEND_DIR / "data" / "boosts.json"
 
 # Fail closed on a real deployment with no key set.
 if not MOCK and not API_KEY:
@@ -80,6 +104,11 @@ class MockBackend:
 
     def free_usdso(self):
         return 200.0
+
+    def run_snapshot(self):
+        return {"ts": _time.time(), "source": "mock", "usdso": 200.0, "vault": 0.0,
+                "somi": 30.0, "somi_px": 0.10, "bags": {}, "bags_usd": 0.0,
+                "networth": 203.0}
 
     def leaderboard(self):
         return {"my_rank": 3, "total": 9, "my_volume": 91843.9, "my_pnl": -13.83,
@@ -157,6 +186,39 @@ class LiveBackend:
         except Exception:
             return self._summary().get("usdso_wallet", 0.0)
 
+    def run_snapshot(self):
+        # Exact capital + gas at a run boundary. Only valid when the wallet is
+        # flat (launch, post-flatten stop) — mid-run, funds locked in resting
+        # orders are invisible to every balance read. networth mirrors the
+        # maker's own definition (USDso + vault + bags@mid + SOMI@mid) so the
+        # two figures are directly comparable.
+        b = self.balances()
+        somi_px = None
+        try:
+            ob = self.dex.get_orderbook("SOMI:USDso")
+            if ob.get("bid") and ob.get("ask"):
+                somi_px = (ob["bid"] + ob["ask"]) / 2
+        except Exception:
+            pass
+        bags_usd = 0.0
+        for pair, qty in (b.get("bags") or {}).items():
+            if qty <= 1e-9:
+                continue
+            try:
+                ob = self.dex.get_orderbook(pair)
+                mid = ((ob.get("bid") or 0) + (ob.get("ask") or 0)) / 2
+                bags_usd += qty * mid
+            except Exception:
+                pass
+        networth = b["usdso"] + b["usdso_vault"] + bags_usd
+        if somi_px:
+            networth += b["somi"] * somi_px
+        return {"ts": _time.time(), "source": "live", "usdso": b["usdso"],
+                "vault": b["usdso_vault"], "somi": b["somi"],
+                "somi_px": round(somi_px, 6) if somi_px else None,
+                "bags": b.get("bags") or {}, "bags_usd": round(bags_usd, 4),
+                "networth": round(networth, 4)}
+
     def leaderboard(self):
         st = self.lb.get_my_stats()
         return {"my_rank": st.get("my_rank"), "total": st.get("total"),
@@ -175,14 +237,31 @@ class LiveBackend:
             usdso = self.dex.wallet.erc20_balance(self.cfg.USDSO_ADDRESS, 18)
             inv = 0.0
             for pair, m in self.cfg.MARKETS.items():
-                if pair not in ELIGIBLE_PAIRS or m.get("native") or int(str(m["base"]), 16) == 0:
+                if pair not in ELIGIBLE_PAIRS:
                     continue
-                b = self.dex.wallet.erc20_balance(m["base"], int(m["baseDecimals"]))
-                if b <= 0:
+                native = m.get("native") or int(str(m["base"]), 16) == 0
+                b = 0.0 if native else self.dex.wallet.erc20_balance(m["base"], int(m["baseDecimals"]))
+                # Funds locked in OUR resting orders are invisible to balanceOf
+                # (5th instance of the bug class) — while the maker quotes, a
+                # resting $40 order read as burned capital and inflated $/1k.
+                locked_base = 0.0
+                try:
+                    for o in (self.dex.get_open_orders(pair) or []):
+                        rem = float(o.get("remaining") or 0)
+                        px = float(o.get("price") or 0)
+                        if rem <= 0 or px <= 0:
+                            continue
+                        if o.get("side") == "buy":
+                            usdso += rem * px
+                        else:
+                            locked_base += rem
+                except Exception:
+                    pass
+                if b + locked_base <= 0:
                     continue
                 ob = self.dex.get_orderbook(pair)
                 mid = ((ob.get("bid") or 0) + (ob.get("ask") or 0)) / 2
-                inv += b * mid
+                inv += (b + locked_base) * mid
             cap = usdso + inv
             for r in rows:
                 if not r.get("is_me"):
@@ -277,14 +356,24 @@ def require_key(x_api_key: str = Header(default="")):
 
 
 class LaunchBody(BaseModel):
-    mode: str                       # "steady" | "fast"
+    mode: str                       # "steady" | "fast" | "maker" | "atomic"
     target: float
     leg: float
     pair: str | None = None         # e.g. WBTC:USDso (default WETH:USDso)
     slip: float | None = None
-    bleed_cap: float | None = None  # steady only
+    bleed_cap: float | None = None  # steady + maker
     cost_ceil: float | None = None  # steady only
-    spread_gate: float | None = None  # steady + fast
+    spread_gate: float | None = None  # steady + fast + atomic
+    weekly_target: float | None = None  # steady only — Arena weekly volume cap
+    cap: float | None = None        # maker only — per-pair inventory cap ($)
+    inv_floor: float | None = None  # maker only — standing-inventory fraction of cap
+    toll_cap: float | None = None   # atomic only — max net quote lost per $1k
+    tx_mode: str | None = None      # atomic only — "type2" (default) | "type4"
+    delegate: str | None = None     # atomic only — override RoundTrip7702 address
+
+
+class BoostsBody(BaseModel):
+    boosts: dict[str, float]        # pair -> weekly score multiplier
 
 
 class LoginBody(BaseModel):
@@ -343,7 +432,19 @@ def login(body: LoginBody, request: Request):
 # ── Read endpoints ────────────────────────────────────────────────────────
 @app.get("/status")
 def status(_=Depends(require_key)):
-    return engine.status()
+    out = engine.status()
+    # An engine that stops itself (target hit / bleed cap / breaker) never goes
+    # through /stop — record its final verdict here, once. The 30s grace keeps
+    # a dashboard poll from racing an explicit /stop's stop→flatten→finalize
+    # (engines flatten themselves on self-stop, so the read is accurate by then).
+    if (not out.get("running") and out.get("started_at") and not out.get("final")
+            and out.get("ended_at") and _time.time() - out["ended_at"] > 30):
+        try:
+            _finalize_run()
+            out = engine.status()
+        except Exception:
+            pass
+    return out
 
 
 @app.get("/balances")
@@ -374,10 +475,36 @@ def audit(n: int = 50, _=Depends(require_key)):
 
 
 # ── Control endpoints ─────────────────────────────────────────────────────
+@app.get("/boosts")
+def get_boosts(_=Depends(require_key)):
+    try:
+        return json.loads(BOOSTS_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return {"boosts": {}}
+
+
+@app.post("/boosts")
+def set_boosts(body: BoostsBody, _=Depends(require_key)):
+    """Set the week's pair boosts (from the Monday announcement). Replaces the
+    whole map — send every boosted pair each time; {} clears all boosts. The
+    engine applies it within ~60s, no restart needed."""
+    bad = {k: v for k, v in body.boosts.items() if not (0.5 <= v <= 5.0)}
+    if bad:
+        raise HTTPException(status_code=400,
+                            detail=f"multiplier(s) outside the 0.5–5.0 sanity band: {bad}")
+    BOOSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = BOOSTS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"boosts": body.boosts, "updated_at": _time.time()}, indent=2))
+    tmp.replace(BOOSTS_FILE)
+    engine.audit("boosts", body.boosts)
+    return {"ok": True, "boosts": body.boosts}
+
+
 @app.post("/launch")
 def launch(body: LaunchBody, _=Depends(require_key)):
     params = {"target": body.target, "leg": body.leg}
-    for k in ("pair", "slip", "bleed_cap", "cost_ceil", "spread_gate"):
+    for k in ("pair", "slip", "bleed_cap", "cost_ceil", "spread_gate", "weekly_target",
+              "cap", "inv_floor", "toll_cap", "tx_mode", "delegate"):
         v = getattr(body, k)
         if v is not None:
             params[k] = v
@@ -404,10 +531,39 @@ def launch(body: LaunchBody, _=Depends(require_key)):
         )
 
     try:
-        state = engine.launch(body.mode, params)
+        state = engine.launch(body.mode, params, baseline=_run_baseline("launch"))
     except EngineError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True, "state": state}
+
+
+def _run_baseline(source: str):
+    """Capital+gas snapshot for a run about to start. A failed read must never
+    block a launch — return None and let the START-log fallback cover display."""
+    try:
+        baseline = backend.run_snapshot()
+        baseline["source"] = source
+        return baseline
+    except Exception:
+        return None
+
+
+def _finalize_run():
+    """Record the run's final capital verdict (post-flatten, wallet flat again)
+    and its runs.jsonl record. Idempotent via engine.finalize."""
+    st = engine._read_state()
+    if not st or st.get("final") or not st.get("started_at"):
+        return
+    final = backend.run_snapshot()
+    final["source"] = "final"
+    # Launch-time snapshot, or the START-log fallback engine.status() synthesizes.
+    base = st.get("baseline") or engine.status().get("baseline") or {}
+    pnl = round(final["networth"] - base["networth"], 4) if base.get("networth") is not None else None
+    gas = round(base["somi"] - final["somi"], 4) if base.get("somi") is not None else None
+    final["pnl"] = pnl
+    final["gas_somi"] = gas
+    final["gas_usd"] = round(gas * final["somi_px"], 4) if (gas is not None and final.get("somi_px")) else None
+    engine.finalize(final)
 
 
 @app.post("/stop")
@@ -422,7 +578,11 @@ def stop(_=Depends(require_key)):
         flat = backend.flatten()
     except Exception as e:
         flat = {"status": "error", "error": str(e)[:160]}
-    return {"ok": True, "state": st, "flatten": flat}
+    try:
+        _finalize_run()
+    except Exception:
+        pass   # bookkeeping must never fail the stop
+    return {"ok": True, "state": engine._read_state() or st, "flatten": flat}
 
 
 @app.post("/autorestart")
@@ -458,11 +618,50 @@ def autorestart(_=Depends(require_key)):
     except Exception:
         pass
     try:
-        engine.launch(mode, params)
+        # Post-crash the wallet may still hold order-locked funds this read can't
+        # see; the maker's own START log line (parsed as fallback) corrects networth.
+        engine.launch(mode, params, baseline=_run_baseline("autorestart"))
     except EngineError as e:
         return {"action": "failed", "error": str(e)}
     engine.audit("autorestart", {"mode": mode, "params": params, "after": st.get("end_reason")})
     return {"action": "relaunched", "mode": mode, "params": params}
+
+
+@app.post("/keepalive")
+def keepalive(_=Depends(require_key)):
+    """Idle-DQ guard (cron, hourly). While an engine runs it trades on its own;
+    after a self-stop (target hit, breaker) nothing trades and the >24h-idle DQ
+    clock starts. Detection: the leaderboard's lifetime volume only moves on a
+    trade, so if it hasn't moved for KEEPALIVE_AGE_S we buy KEEPALIVE_USDSO of
+    SOMI — one real IOC that resets the idle clock AND lands as gas we need
+    anyway. When the board is unreachable we fall back to the same idle timer
+    (a spare $1 trade is cheaper than a DQ)."""
+    if engine.is_running():
+        return {"action": "none", "reason": "engine running — it trades on its own"}
+    now = _time.time()
+    st = _keepalive_state()
+    try:
+        lb = backend.leaderboard()
+        vol = lb.get("my_volume") if lb.get("live") else None
+    except Exception:
+        vol = None
+    if not st:
+        _save_keepalive_state({"volume": vol, "changed_at": now})
+        return {"action": "none", "reason": "first check — baseline recorded", "volume": vol}
+    if vol is not None and vol != st.get("volume"):
+        _save_keepalive_state({"volume": vol, "changed_at": now})
+        return {"action": "none", "reason": "volume moved — a trade happened", "volume": vol}
+    idle_s = now - (st.get("changed_at") or now)
+    if idle_s < KEEPALIVE_AGE_S:
+        return {"action": "none",
+                "reason": f"idle {idle_s / 3600:.1f}h < {KEEPALIVE_AGE_S / 3600:.0f}h threshold"}
+    engine.audit("keepalive", {"idle_h": round(idle_s / 3600, 1), "usdso": KEEPALIVE_USDSO})
+    try:
+        res = backend.gas_topup(KEEPALIVE_USDSO)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+    _save_keepalive_state({"volume": vol, "changed_at": now})
+    return {"action": "traded", "idle_h": round(idle_s / 3600, 1), "result": res}
 
 
 @app.post("/gas/topup")
