@@ -20,7 +20,8 @@
 │   ├── maker_feasibility.py         # Read-only feasibility probe for maker pairs; 160-sample
 │   │                                #   run with book snapshots, EMA yield oracle, candle analysis
 │   ├── tests/                       # Unit tests
-│   │   └── test_maker_core.py       # 19 tests for maker_core decision logic
+│   │   ├── test_maker_core.py       # 19 tests for maker_core decision logic
+│   │   └── test_legsize.py          # 8 tests for depth-aware leg sizing
 │   ├── cheap.sh                     # Launcher (steady): target, bleed_cap, leg, cost_ceil
 │   ├── direct_burst.sh              # Launcher (fast): target, leg, slip, spread_gate
 │   ├── control/                     # Engine-control API + dashboard (host-run FastAPI)
@@ -49,6 +50,7 @@
 │   ├── trading/                     # Shared utilities (used by the live engines)
 │   │   ├── wallet.py                # Web3 signing + FailoverHTTPProvider (multi-RPC rotation)
 │   │   ├── dreamdex.py              # REST wrapper, placeOrder calldata, fill tracking
+│   │   ├── legsize.py               # Depth-aware leg sizing: touch_fit_leg, touch_depth_usd
 │   │   └── manual.py                # Manual-trade handler — reused by control /trade
 │   ├── monitor/                     # Monitoring
 │   │   ├── db.py                    # SQLite persistence (used by agent_v3/runner)
