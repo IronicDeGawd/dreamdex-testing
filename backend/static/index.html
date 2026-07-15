@@ -232,7 +232,8 @@
                     </div>
                     <div class="flex flex-col gap-1">
                         <label class="text-xs text-textMuted uppercase">Leg ($)</label>
-                        <input id="f_leg" type="number" class="input-base w-24" value="25">
+                        <input id="f_leg" type="number" class="input-base w-24" value="25" oninput="checkLeg()">
+                        <span id="f_leg_max" class="font-mono" style="font-size:10px;color:var(--c-muted)" title="a leg above 0.8× free USDso pre-reverts on the first buy">max —</span>
                     </div>
                     <div class="flex flex-col gap-1">
                         <label class="text-xs text-textMuted uppercase">Slip</label>
@@ -283,8 +284,8 @@
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Rolling cost</span><span id="s_cost">—</span></div>
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Uptime</span><span id="s_up">—</span></div>
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Target</span><span id="s_target">—</span></div>
-                    <div class="table-row flex justify-between py-1.5"><span class="text-textMuted" title="mark-to-market: swings with held inventory">Run P&amp;L (mark)</span><span id="s_pnl">—</span></div>
-                    <div class="table-row flex justify-between py-1.5"><span class="text-textMuted" title="locked-in round-trip profit — only moves when a sell fills">Realized P&amp;L</span><span id="s_real">—</span></div>
+                    <div class="table-row flex justify-between py-1.5"><span id="s_pnllabel" class="text-textMuted" title="the run's profit/loss vs its launch baseline">Run P&amp;L</span><span id="s_pnl">—</span></div>
+                    <div id="row_real" class="table-row flex justify-between py-1.5 hidden"><span class="text-textMuted" title="locked-in round-trip profit — only moves when a sell fills (maker holds inventory, so this differs from the mark)">Realized P&amp;L</span><span id="s_real">—</span></div>
                     <div class="table-row flex justify-between py-1.5"><span class="text-textMuted">Gas used</span><span id="s_gas">—</span></div>
                 </div>
             </section>
@@ -602,6 +603,11 @@ async function refreshStatus(){
     const pnl = s.final?.pnl ?? s.run_pnl;
     $("s_pnl").textContent = pnl!=null ? ((pnl<0?"−$":"+$")+Math.abs(pnl).toFixed(4)) : "—";
     $("s_pnl").className = pnl==null ? "" : (pnl<0 ? "text-warning" : "text-success");
+    // Only the maker holds inventory, so only it has a mark-vs-realized split.
+    // Takers end each trip flat — their Run P&L is already realized.
+    const isMaker = s.mode==="maker";
+    $("s_pnllabel").textContent = isMaker ? "Run P&L (mark)" : "Run P&L";
+    $("row_real").classList.toggle("hidden", !isMaker);
     const rp = s.realized_pnl;
     $("s_real").textContent = rp!=null ? ((rp<0?"−$":"+$")+Math.abs(rp).toFixed(4)) : "—";
     $("s_real").className = rp==null ? "" : (rp<0 ? "text-warning" : "text-success");
@@ -616,6 +622,7 @@ async function refreshStatus(){
     $("lock-note").textContent = run ? "engine running — one at a time" : "";
   }catch(e){ setConn(false, e.message.slice(0,20)); }
 }
+let _maxLeg = null;   // 0.8 × free USDso — the launch guard's ceiling
 async function refreshBalances(){
   try{
     const b=await api("/balances");
@@ -627,7 +634,19 @@ async function refreshBalances(){
     $("b_wbtc").textContent=fmt(b.wbtc,8); $("b_weth").textContent=fmt(b.weth,6);
     $("b_wbtc").className = b.wbtc>0 ? "text-warning" : "";
     $("b_weth").className = b.weth>0 ? "text-warning" : "";
+    if(b.usdso!=null){ _maxLeg = 0.8 * b.usdso; checkLeg(); }
   }catch(e){}
+}
+// Show (and validate against) the biggest leg the launch guard will accept:
+// 0.8 × free USDso — a leg above that pre-reverts on the first buy.
+function checkLeg(){
+  const el=$("f_leg_max"); if(!el) return;
+  if(_maxLeg==null){ el.textContent="max —"; return; }
+  const leg=+$("f_leg").value||0;
+  el.textContent="max $"+_maxLeg.toFixed(2);
+  const over = leg>_maxLeg;
+  el.style.color = over ? "var(--c-danger)" : "var(--c-muted)";
+  $("f_leg").style.borderColor = over ? "var(--c-danger)" : "";
 }
 async function refreshLeaderboard(){
   try{

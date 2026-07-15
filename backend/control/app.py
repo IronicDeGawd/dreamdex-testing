@@ -283,15 +283,21 @@ class LiveBackend:
         return rows
 
     def gas_topup(self, somi_usdso):
+        import math
         ob = self.dex.get_orderbook("SOMI:USDso")
         bid, ask = ob.get("bid"), ob.get("ask")
         if not bid or not ask:
             return {"status": "error", "error": "no SOMI:USDso book"}
         mid = (bid + ask) / 2
-        qty = somi_usdso / mid
+        # The SOMI order quantity must be a whole multiple of the pool's lot size,
+        # or the order is rejected (invalid_amount). Snap DOWN to the lot.
+        lot = float(self.cfg.MARKETS.get("SOMI:USDso", {}).get("lotSize", 0.01)) or 0.01
+        qty = round(math.floor((somi_usdso / mid) / lot) * lot, 10)
+        if qty <= 0:
+            return {"status": "error", "error": f"amount too small for lot {lot}"}
         res = self.dex.place_order("SOMI:USDso", "buy", qty, order_type="ioc",
                                    funding="wallet", gas_min=self.cfg.SOMI_BUY_GAS_LIMIT)
-        return {"status": res.get("status"), "somi_qty": round(qty, 4),
+        return {"status": res.get("status"), "somi_qty": qty,
                 "spent_usdso": somi_usdso, "result": res}
 
     def flatten(self):
@@ -370,6 +376,7 @@ class LaunchBody(BaseModel):
     toll_cap: float | None = None   # atomic only — max net quote lost per $1k
     tx_mode: str | None = None      # atomic only — "type2" (default) | "type4"
     delegate: str | None = None     # atomic only — override RoundTrip7702 address
+    somi_floor: float | None = None  # atomic — stop below this SOMI (default 3)
 
 
 class BoostsBody(BaseModel):
@@ -504,7 +511,7 @@ def set_boosts(body: BoostsBody, _=Depends(require_key)):
 def launch(body: LaunchBody, _=Depends(require_key)):
     params = {"target": body.target, "leg": body.leg}
     for k in ("pair", "slip", "bleed_cap", "cost_ceil", "spread_gate", "weekly_target",
-              "cap", "inv_floor", "toll_cap", "tx_mode", "delegate"):
+              "cap", "inv_floor", "toll_cap", "tx_mode", "delegate", "somi_floor"):
         v = getattr(body, k)
         if v is not None:
             params[k] = v
