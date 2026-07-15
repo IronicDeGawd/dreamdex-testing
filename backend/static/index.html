@@ -232,7 +232,8 @@
                     </div>
                     <div class="flex flex-col gap-1">
                         <label class="text-xs text-textMuted uppercase">Leg ($)</label>
-                        <input id="f_leg" type="number" class="input-base w-24" value="25">
+                        <input id="f_leg" type="number" class="input-base w-24" value="25" oninput="checkLeg()">
+                        <span id="f_leg_max" class="font-mono" style="font-size:10px;color:var(--c-muted)" title="a leg above 0.8× free USDso pre-reverts on the first buy">max —</span>
                     </div>
                     <div class="flex flex-col gap-1">
                         <label class="text-xs text-textMuted uppercase">Slip</label>
@@ -621,6 +622,7 @@ async function refreshStatus(){
     $("lock-note").textContent = run ? "engine running — one at a time" : "";
   }catch(e){ setConn(false, e.message.slice(0,20)); }
 }
+let _maxLeg = null;   // 0.8 × free USDso — the launch guard's ceiling
 async function refreshBalances(){
   try{
     const b=await api("/balances");
@@ -632,7 +634,19 @@ async function refreshBalances(){
     $("b_wbtc").textContent=fmt(b.wbtc,8); $("b_weth").textContent=fmt(b.weth,6);
     $("b_wbtc").className = b.wbtc>0 ? "text-warning" : "";
     $("b_weth").className = b.weth>0 ? "text-warning" : "";
+    if(b.usdso!=null){ _maxLeg = 0.8 * b.usdso; checkLeg(); }
   }catch(e){}
+}
+// Show (and validate against) the biggest leg the launch guard will accept:
+// 0.8 × free USDso — a leg above that pre-reverts on the first buy.
+function checkLeg(){
+  const el=$("f_leg_max"); if(!el) return;
+  if(_maxLeg==null){ el.textContent="max —"; return; }
+  const leg=+$("f_leg").value||0;
+  el.textContent="max $"+_maxLeg.toFixed(2);
+  const over = leg>_maxLeg;
+  el.style.color = over ? "var(--c-danger)" : "var(--c-muted)";
+  $("f_leg").style.borderColor = over ? "var(--c-danger)" : "";
 }
 async function refreshLeaderboard(){
   try{
