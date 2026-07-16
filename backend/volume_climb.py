@@ -25,6 +25,7 @@ import os, time, math, signal, config
 import requests as _rq
 from web3 import Web3
 from trading.dreamdex import DreamDEX
+from trading.legsize import touch_fit_leg, touch_depth_usd
 
 # A host/DNS/RPC outage is TRANSIENT — it must not burn the 5-strike trade breaker
 # and halt the run (halting risks the 24h-idle DQ). Back off and keep retrying;
@@ -51,6 +52,11 @@ PAIRS = [p.strip() for p in _pairs_env.split(",") if p.strip()]
 
 TARGET_VOLUME   = float(os.environ.get("CLIMB_TARGET_VOLUME", "300"))
 LEG_USD         = float(os.environ.get("CLIMB_LEG_USD", "15"))
+# Depth-aware leg: opt-in, active only when BOTH bounds are set. Off ⇒ fixed LEG_USD.
+LEG_MIN         = float(os.environ.get("CLIMB_LEG_MIN", "0"))
+LEG_MAX         = float(os.environ.get("CLIMB_LEG_MAX", "0"))
+TOUCH_FRAC      = float(os.environ.get("CLIMB_TOUCH_FRAC", "0.8"))
+DYNAMIC_LEG     = LEG_MIN > 0 and LEG_MAX > 0 and LEG_MAX >= LEG_MIN
 SLIP_PCT        = float(os.environ.get("CLIMB_SLIP_PCT", "0.003"))
 MAX_GAS_SOMI    = float(os.environ.get("CLIMB_MAX_GAS_SOMI", "8"))
 SOMI_FLOOR      = float(os.environ.get("CLIMB_SOMI_FLOOR", "8"))
@@ -164,8 +170,10 @@ def ensure_allowance(pool, token, dec, need_human):
     h = w.sign_and_send(tx); w.wait_for_receipt(h)
     print(f"  pre-approved {token[:10]} @ {pool[:10]} -> {need_human} (tx {h[:14]})")
 
+_leg_desc = (f"${LEG_MIN:.0f}-${LEG_MAX:.0f}(dyn {TOUCH_FRAC:g}x)"
+             if DYNAMIC_LEG else f"${LEG_USD:.0f}")
 print(f"=== VOLUME CLIMB (rotating) pairs={PAIRS} ===")
-print(f"target=${TARGET_VOLUME} leg=${LEG_USD} slip={SLIP_PCT*100}% "
+print(f"target=${TARGET_VOLUME} leg={_leg_desc} slip={SLIP_PCT*100}% "
       f"caps: gas<{MAX_GAS_SOMI} floor={SOMI_FLOOR} bleed<${MAX_USDSO_BLEED} iters<{MAX_ITERS}")
 u_start, s_start = usdso_total(), sb()
 print(f"START USDso={u_start:.4f} (wallet+reserved) SOMI={s_start:.4f}")
@@ -255,7 +263,7 @@ def tg(msg):
                       json={"chat_id": TG_CHAT, "text": msg}, timeout=10)
     except Exception: pass
 _paused = False; _last_ms = 0.0
-tg(f"🚀 Volume run: pairs {PAIRS} target ${TARGET_VOLUME:,.0f}, leg ${LEG_USD:.0f}, cost-ceil ${COST_CEIL_PER_1K}/1k")
+tg(f"🚀 Volume run: pairs {PAIRS} target ${TARGET_VOLUME:,.0f}, leg {_leg_desc}, cost-ceil ${COST_CEIL_PER_1K}/1k")
 
 def flatten_all(max_attempts=None):
     """Sell any residual base on every pair back to USDso (never exit with a bag).
@@ -349,19 +357,28 @@ def eff_spread_pct(bids, asks, leg_usd):
         return None
     return (buy - sell) / mid * 100
 
-def pick_cheapest(leg_usd):
-    """Pick the pair with the lowest EFFECTIVE spread for a leg of `leg_usd` — i.e.
-    what we'd really pay after walking the book — not the top-of-book quote. A pair
-    whose visible depth can't absorb our order is skipped: WETH's touch often holds
-    less than an $80 leg, so its quoted spread understates the true cost by ~50%.
+def _leg_for(bids, asks, sp):
+    """Per-pair leg for this round: depth-fitted into [LEG_MIN,LEG_MAX] when
+    dynamic sizing is on, else the fixed LEG_USD (backward-compat default)."""
+    mid = (bids[0][0] + asks[0][0]) / 2
+    depth = touch_depth_usd(bids, asks)
+    return touch_fit_leg(depth, mid, sp["minq"], leg_min=LEG_MIN, leg_max=LEG_MAX,
+                         frac=TOUCH_FRAC, fixed_leg=LEG_USD, dynamic=DYNAMIC_LEG)
+
+def pick_cheapest(fixed_leg):
+    """Pick the pair with the lowest EFFECTIVE spread — what we'd really pay after
+    walking the book — not the top-of-book quote. Each pair is evaluated at ITS
+    OWN depth-fitted leg (a touch-fitting leg makes eff ≈ quoted, the tightest
+    achievable). A pair whose visible depth can't absorb the leg is skipped.
 
     Boost-aware (Arena): pairs are ranked by eff ÷ boost — the spread paid per
     unit of SCORE, not per unit of raw volume — and the gates scale the same way
     (a 1.5× pair is allowed 1.5× the toll for the same score). All boosts 1.0
     reduces this to the plain effective-spread ranking.
 
-    Returns (spec, ob, eff_pct, quoted_pct, boost, within_gate); (None,...) if no
-    pair has a usable book. Falls back to top-of-book if the depth fetch fails."""
+    Returns (spec, ob, eff_pct, quoted_pct, boost, within_gate, leg); (None,...)
+    if no pair has a usable book. `leg` is the winner's depth-fitted size, used
+    for the trip. Falls back to top-of-book (and the fixed leg) if depth fails."""
     boosts = pair_boosts()
     best = None
     for sp in SPECS.values():
@@ -372,9 +389,10 @@ def pick_cheapest(leg_usd):
             ob = {"bid": bids[0][0], "ask": asks[0][0]}
             mid = (ob["bid"] + ob["ask"]) / 2
             quoted = (ob["ask"] - ob["bid"]) / mid * 100
-            eff = eff_spread_pct(bids, asks, leg_usd)
+            leg = _leg_for(bids, asks, sp)
+            eff = eff_spread_pct(bids, asks, leg)
             if eff is None:
-                print(f"  {sp['pair']}: visible book too thin for a ${leg_usd:.0f} leg — skip")
+                print(f"  {sp['pair']}: visible book too thin for a ${leg:.0f} leg — skip")
                 continue
         except Exception:
             # depth endpoint hiccup — fall back to top-of-book for this pair
@@ -386,12 +404,13 @@ def pick_cheapest(leg_usd):
                 continue
             mid = (ob["bid"] + ob["ask"]) / 2
             quoted = eff = (ob["ask"] - ob["bid"]) / mid * 100
+            leg = fixed_leg   # no depth data to size from → fixed leg
         bst = boosts.get(sp["pair"], 1.0)
         if best is None or eff / bst < best[0]:
-            best = (eff / bst, sp, ob, eff, quoted, bst)
+            best = (eff / bst, sp, ob, eff, quoted, bst, leg)
     if best is None:
-        return None, None, None, None, 1.0, False
-    _, sp, ob, eff, quoted, bst = best
+        return None, None, None, None, 1.0, False, fixed_leg
+    _, sp, ob, eff, quoted, bst, leg = best
     # A round-trip crosses the effective spread once on a notional of `leg`, and
     # books 2x leg of volume — so the toll per 1k of volume is eff% x 5.
     implied_toll = eff * 5.0
@@ -400,7 +419,7 @@ def pick_cheapest(leg_usd):
         within = False
     if COST_CEIL_PER_1K > 0 and implied_toll / bst > COST_CEIL_PER_1K:
         within = False
-    return sp, ob, eff, quoted, bst, within
+    return sp, ob, eff, quoted, bst, within, leg
 
 for i in range(MAX_ITERS):
     try:
@@ -442,9 +461,9 @@ for i in range(MAX_ITERS):
         if consec_fail >= MAX_CONSEC_FAIL: stop(f"{MAX_CONSEC_FAIL} consecutive failures")
 
         # Rank by the spread we'd ACTUALLY pay at our leg size, not the quote.
-        sp, ob, spread_pct, quoted_pct, boost, within = pick_cheapest(LEG_USD)
+        sp, ob, spread_pct, quoted_pct, boost, within, leg_pick = pick_cheapest(LEG_USD)
         if sp is None:
-            print(f"[{i}] no pair with a book deep enough for a ${LEG_USD:.0f} leg — pause {PAUSE_EXP_S:.0f}s")
+            print(f"[{i}] no pair with a usable book for the leg — pause {PAUSE_EXP_S:.0f}s")
             time.sleep(PAUSE_EXP_S); continue
 
         idle_s = time.time() - _last_trade_ts
@@ -460,7 +479,7 @@ for i in range(MAX_ITERS):
                   f"— pause {PAUSE_EXP_S:.0f}s (idle {idle_s/3600:.1f}h)")
             time.sleep(PAUSE_EXP_S); continue
 
-        leg_this = LEG_USD
+        leg_this = leg_pick
         if force_keepalive:
             leg_this = KEEPALIVE_LEG
             print(f"[{i}] KEEPALIVE: idle {idle_s/3600:.1f}h > {LIVENESS_S/3600:.0f}h — forcing ${leg_this:.0f} trip on {sp['pair']} @ {spread_pct:.3f}% (over gate, staying alive)")
@@ -522,7 +541,7 @@ for i in range(MAX_ITERS):
         impact = spread_pct - quoted_pct
         implied = spread_pct * 5.0
         bnote = f" boost {boost:g}x" if boost != 1.0 else ""
-        print(f"[{i}] trip {trips} {tag} @eff {spread_pct:.3f}% (quoted {quoted_pct:.3f}%, impact {impact:+.3f}%){bnote}: "
+        print(f"[{i}] trip {trips} {tag} leg=${leg_this:.0f} @eff {spread_pct:.3f}% (quoted {quoted_pct:.3f}%, impact {impact:+.3f}%){bnote}: "
               f"vol+=${vt:.2f} tot=${vol:.2f} wk=${wk_vol:.2f} USDso={u:.4f}(bleed ${u_start-u:.4f}) SOMI={s:.4f} "
               f"| implied ${implied:.3f}/1k cost ${cost_1k:.3f}/1k roll ${roll:.3f}/1k")
         if _paused:

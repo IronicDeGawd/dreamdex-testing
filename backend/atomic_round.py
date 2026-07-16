@@ -44,6 +44,7 @@ from web3 import Web3
 from eth_account import Account
 from trading.dreamdex import DreamDEX
 from trading.delegate import encode_roundtrip, decode_trip
+from trading.legsize import touch_fit_leg, touch_depth_usd
 
 ELIGIBLE = {"WBTC:USDso", "WETH:USDso", "SOMI:USDso"}
 
@@ -51,6 +52,11 @@ _pairs_env = os.environ.get("ATOM_PAIRS", os.environ.get("ATOM_PAIR", "WETH:USDs
 PAIRS_IN   = [p.strip() for p in _pairs_env.split(",") if p.strip()]
 TARGET     = float(os.environ.get("ATOM_TARGET", "100000"))
 LEG_USD    = float(os.environ.get("ATOM_LEG_USD", "25"))
+# Depth-aware leg: opt-in, active only when BOTH bounds are set. Off ⇒ fixed LEG_USD.
+LEG_MIN    = float(os.environ.get("ATOM_LEG_MIN", "0"))
+LEG_MAX    = float(os.environ.get("ATOM_LEG_MAX", "0"))
+TOUCH_FRAC = float(os.environ.get("ATOM_TOUCH_FRAC", "0.8"))
+DYNAMIC_LEG = LEG_MIN > 0 and LEG_MAX > 0 and LEG_MAX >= LEG_MIN
 SLIP       = float(os.environ.get("ATOM_SLIP", "0.004"))
 SPREAD_GATE_PCT = float(os.environ.get("ATOM_SPREAD_GATE_PCT", "0.15"))
 COST_CEIL_PER_1K = float(os.environ.get("ATOM_COST_CEIL_PER_1K", "0"))   # 0 = off
@@ -221,10 +227,21 @@ def eff_spread_pct(bids, asks, leg_usd):
         return None
     return (buy - sell) / mid * 100
 
-def pick_cheapest(leg_usd):
-    """Return (spec, ob, eff_pct, quoted_pct, boost, within_gate) for the pair
-    with the lowest effective-spread ÷ boost, or (None,...) if none has a usable
-    book for the leg. Falls back to top-of-book if the depth fetch fails."""
+def _leg_for(bids, asks, sp):
+    """Per-pair leg for this round: depth-fitted into [LEG_MIN,LEG_MAX] when
+    dynamic sizing is on, else the fixed LEG_USD (backward-compat default)."""
+    mid = (bids[0][0] + asks[0][0]) / 2
+    depth = touch_depth_usd(bids, asks)
+    return touch_fit_leg(depth, mid, sp["minq"], leg_min=LEG_MIN, leg_max=LEG_MAX,
+                         frac=TOUCH_FRAC, fixed_leg=LEG_USD, dynamic=DYNAMIC_LEG)
+
+def pick_cheapest(fixed_leg):
+    """Return (spec, ob, eff_pct, quoted_pct, boost, within_gate, leg) for the
+    pair with the lowest effective-spread ÷ boost, or (None,...) if none has a
+    usable book. Each pair is evaluated at ITS OWN depth-fitted leg (a
+    touch-fitting leg makes eff ≈ quoted, the tightest achievable); `leg` is the
+    winner's size, used for the actual trip. Falls back to top-of-book (and the
+    fixed leg) if the depth fetch fails."""
     boosts = pair_boosts()
     best = None
     for sp in SPECS.values():
@@ -235,9 +252,10 @@ def pick_cheapest(leg_usd):
             ob = {"bid": bids[0][0], "ask": asks[0][0]}
             mid = (ob["bid"] + ob["ask"]) / 2
             quoted = (ob["ask"] - ob["bid"]) / mid * 100
-            eff = eff_spread_pct(bids, asks, leg_usd)
+            leg = _leg_for(bids, asks, sp)
+            eff = eff_spread_pct(bids, asks, leg)
             if eff is None:
-                print(f"  {sp['pair']}: visible book too thin for a ${leg_usd:.0f} leg — skip")
+                print(f"  {sp['pair']}: visible book too thin for a ${leg:.0f} leg — skip")
                 continue
         except Exception:
             try:
@@ -248,19 +266,20 @@ def pick_cheapest(leg_usd):
                 continue
             mid = (ob["bid"] + ob["ask"]) / 2
             quoted = eff = (ob["ask"] - ob["bid"]) / mid * 100
+            leg = fixed_leg   # no depth data to size from → fixed leg
         bst = boosts.get(sp["pair"], 1.0)
         if best is None or eff / bst < best[0]:
-            best = (eff / bst, sp, ob, eff, quoted, bst)
+            best = (eff / bst, sp, ob, eff, quoted, bst, leg)
     if best is None:
-        return None, None, None, None, 1.0, False
-    _, sp, ob, eff, quoted, bst = best
+        return None, None, None, None, 1.0, False, fixed_leg
+    _, sp, ob, eff, quoted, bst, leg = best
     implied_toll = eff * 5.0   # round-trip crosses the eff spread once over 2x leg
     within = True
     if SPREAD_GATE_PCT > 0 and eff / bst > SPREAD_GATE_PCT:
         within = False
     if COST_CEIL_PER_1K > 0 and implied_toll / bst > COST_CEIL_PER_1K:
         within = False
-    return sp, ob, eff, quoted, bst, within
+    return sp, ob, eff, quoted, bst, within, leg
 
 # ── Delegation + trip execution ─────────────────────────────────────────────
 def ensure_delegated():
@@ -351,10 +370,12 @@ def _on_term(signum, frame):
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, _on_term)
 
-print(f"START ATOMIC pairs={PAIRS} leg=${LEG_USD} target=${TARGET} tx_mode={TX_MODE} "
+_leg_desc = (f"${LEG_MIN:.0f}-${LEG_MAX:.0f}(dyn {TOUCH_FRAC:g}x)"
+             if DYNAMIC_LEG else f"${LEG_USD:.0f}")
+print(f"START ATOMIC pairs={PAIRS} leg={_leg_desc} target=${TARGET} tx_mode={TX_MODE} "
       f"gate={SPREAD_GATE_PCT}% cost_ceil=${COST_CEIL_PER_1K}/1k toll_cap=${MAX_TOLL_PER_1K}/1k "
       f"delegate={DELEGATE} USDso={usdso0:.4f} SOMI={somi0:.4f}", flush=True)
-tg(f"🚀 Atomic run: pairs {PAIRS} target ${TARGET:,.0f}, leg ${LEG_USD:.0f}")
+tg(f"🚀 Atomic run: pairs {PAIRS} target ${TARGET:,.0f}, leg {_leg_desc}")
 
 if not ensure_delegated():
     print("=== STOP: delegation install failed ==="); raise SystemExit(1)
@@ -395,9 +416,9 @@ for i in range(MAX_ITERS):
         if not ensure_delegated():
             print("[deleg] reinstall failed — pause"); time.sleep(PAUSE_EXP_S); continue
 
-        sp, ob, spread_pct, quoted_pct, boost, within = pick_cheapest(LEG_USD)
+        sp, ob, spread_pct, quoted_pct, boost, within, leg_pick = pick_cheapest(LEG_USD)
         if sp is None:
-            print(f"[{i}] no pair deep enough for a ${LEG_USD:.0f} leg — pause {PAUSE_EXP_S:.0f}s")
+            print(f"[{i}] no pair with a usable book for the leg — pause {PAUSE_EXP_S:.0f}s")
             time.sleep(PAUSE_EXP_S); continue
 
         idle_s = time.time() - _last_trade_ts
@@ -411,7 +432,7 @@ for i in range(MAX_ITERS):
                   f"— pause {PAUSE_EXP_S:.0f}s (idle {idle_s/3600:.1f}h)")
             time.sleep(PAUSE_EXP_S); continue
 
-        leg_this = LEG_USD
+        leg_this = leg_pick
         if force_keepalive:
             leg_this = KEEPALIVE_LEG
             print(f"[{i}] KEEPALIVE: idle {idle_s/3600:.1f}h — forcing ${leg_this:.0f} trip on {sp['pair']}")
@@ -459,7 +480,7 @@ for i in range(MAX_ITERS):
         cost_1k = (toll_usd + gas_usd) / vt * 1000 if vt > 0 else 0.0
         impact = (spread_pct or 0) - (quoted_pct or 0)
         bnote = f" boost {boost:g}x" if boost != 1.0 else ""
-        print(f"[{i}] trip {trips} {tag} @eff {spread_pct:.3f}% (impact {impact:+.3f}%){bnote}: "
+        print(f"[{i}] trip {trips} {tag} leg=${leg_this:.0f} @eff {spread_pct:.3f}% (impact {impact:+.3f}%){bnote}: "
               f"vol+=${vt:.2f} tot=${vol:.2f} wk=${wk_vol:.2f} toll={toll_usd:.5f} "
               f"USDso={u:.4f}(bleed ${usdso0-u:+.4f}) SOMI={s:.4f} gasUsed={r.gasUsed} "
               f"cost ${cost_1k:.3f}/1k", flush=True)

@@ -377,6 +377,9 @@ class LaunchBody(BaseModel):
     tx_mode: str | None = None      # atomic only — "type2" (default) | "type4"
     delegate: str | None = None     # atomic only — override RoundTrip7702 address
     somi_floor: float | None = None  # atomic — stop below this SOMI (default 3)
+    leg_min: float | None = None     # steady + atomic — dynamic leg lower bound ($)
+    leg_max: float | None = None     # steady + atomic — dynamic leg upper bound ($)
+    touch_frac: float | None = None  # steady + atomic — fraction of touch depth (default 0.8)
 
 
 class BoostsBody(BaseModel):
@@ -511,7 +514,8 @@ def set_boosts(body: BoostsBody, _=Depends(require_key)):
 def launch(body: LaunchBody, _=Depends(require_key)):
     params = {"target": body.target, "leg": body.leg}
     for k in ("pair", "slip", "bleed_cap", "cost_ceil", "spread_gate", "weekly_target",
-              "cap", "inv_floor", "toll_cap", "tx_mode", "delegate", "somi_floor"):
+              "cap", "inv_floor", "toll_cap", "tx_mode", "delegate", "somi_floor",
+              "leg_min", "leg_max", "touch_frac"):
         v = getattr(body, k)
         if v is not None:
             params[k] = v
@@ -530,11 +534,17 @@ def launch(body: LaunchBody, _=Depends(require_key)):
         free = backend.free_usdso()
     except Exception:
         free = None
-    if free is not None and body.leg > 0.8 * free:
+    # With dynamic sizing the binding leg is leg_max, not the fixed fallback leg.
+    guard_leg = body.leg
+    guard_name = "leg"
+    if body.leg_max and body.leg_min and body.leg_max >= body.leg_min > 0:
+        guard_leg = body.leg_max
+        guard_name = "leg_max"
+    if free is not None and guard_leg > 0.8 * free:
         raise HTTPException(
             status_code=400,
-            detail=f"leg ${body.leg:.2f} exceeds 0.8× free USDso (${free:.2f}) — "
-                   f"buys would pre-revert; use leg ≤ ${0.8 * free:.2f}",
+            detail=f"{guard_name} ${guard_leg:.2f} exceeds 0.8× free USDso (${free:.2f}) — "
+                   f"buys would pre-revert; use {guard_name} ≤ ${0.8 * free:.2f}",
         )
 
     try:
