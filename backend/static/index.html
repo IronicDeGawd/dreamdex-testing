@@ -235,6 +235,14 @@
                         <input id="f_leg" type="number" class="input-base w-24" value="25" oninput="checkLeg()">
                         <span id="f_leg_max" class="font-mono" style="font-size:10px;color:var(--c-muted)" title="a leg above 0.8× free USDso pre-reverts on the first buy">max —</span>
                     </div>
+                    <div class="flex flex-col gap-1 mode-steady mode-atomic">
+                        <label class="text-xs text-textMuted uppercase" title="Fill BOTH min and max to size each leg to book depth (touch-fit): bigger on deep books (less gas), smaller on thin (less toll). Leave blank to use the fixed Leg.">Dyn leg $ (min/max)</label>
+                        <div class="flex gap-1 items-center">
+                            <input id="f_legmin" type="number" class="input-base w-16" placeholder="min" oninput="checkLeg()">
+                            <input id="f_legmax" type="number" class="input-base w-16" placeholder="max" oninput="checkLeg()">
+                            <input id="f_touch" type="number" step="0.05" class="input-base w-14" placeholder="0.8" title="fraction of touch depth to take (default 0.8)">
+                        </div>
+                    </div>
                     <div class="flex flex-col gap-1">
                         <label class="text-xs text-textMuted uppercase">Slip</label>
                         <input id="f_slip" type="number" step="0.001" class="input-base w-24" placeholder="0.003">
@@ -542,6 +550,10 @@ function launchBody(){
     if($("f_cost").value) b.cost_ceil=+$("f_cost").value;
     if($("f_toll").value) b.toll_cap=+$("f_toll").value;
   }
+  if(MODE==="steady"||MODE==="atomic"){
+    const lo=+$("f_legmin").value, hi=+$("f_legmax").value;
+    if(lo>0 && hi>0){ b.leg_min=lo; b.leg_max=hi; if($("f_touch").value) b.touch_frac=+$("f_touch").value; }
+  }
   return b;
 }
 function confirmLaunch(){
@@ -642,11 +654,15 @@ async function refreshBalances(){
 function checkLeg(){
   const el=$("f_leg_max"); if(!el) return;
   if(_maxLeg==null){ el.textContent="max —"; return; }
-  const leg=+$("f_leg").value||0;
+  // With dynamic sizing filled, the binding leg is leg_max, not the fixed leg.
+  const lo=+($("f_legmin")||{}).value||0, hi=+($("f_legmax")||{}).value||0;
+  const dyn = lo>0 && hi>0;
+  const leg = dyn ? hi : (+$("f_leg").value||0);
   el.textContent="max $"+_maxLeg.toFixed(2);
   const over = leg>_maxLeg;
   el.style.color = over ? "var(--c-danger)" : "var(--c-muted)";
-  $("f_leg").style.borderColor = over ? "var(--c-danger)" : "";
+  $("f_leg").style.borderColor = (!dyn && over) ? "var(--c-danger)" : "";
+  const mx=$("f_legmax"); if(mx) mx.style.borderColor = (dyn && over) ? "var(--c-danger)" : "";
 }
 async function refreshLeaderboard(){
   try{
