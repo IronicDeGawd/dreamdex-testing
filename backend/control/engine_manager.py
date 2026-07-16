@@ -130,10 +130,27 @@ class EngineManager:
         return alive
 
     # ── launch ────────────────────────────────────────────────────────────
+    def _dyn_leg_env(self, p: dict, prefix: str) -> dict:
+        """Depth-aware leg env for a taker engine, emitted only when BOTH bounds
+        are set and sane. Absent/0 bounds ⇒ empty ⇒ engine keeps its fixed leg
+        (backward-compat)."""
+        try:
+            lo = float(p.get("leg_min"))
+            hi = float(p.get("leg_max"))
+        except (TypeError, ValueError):
+            return {}
+        if lo <= 0 or hi <= 0 or hi < lo:
+            return {}
+        return {
+            f"{prefix}_LEG_MIN":    str(lo),
+            f"{prefix}_LEG_MAX":    str(hi),
+            f"{prefix}_TOUCH_FRAC": str(p.get("touch_frac", 0.8)),
+        }
+
     def _steady_env(self, p: dict) -> dict:
         # Mirrors cheap.sh. Pair + spread gate are tunable (liquidity shifted
         # after the public launch — WBTC:USDso is now the tightest book).
-        return {
+        env = {
             "CLIMB_PAIRS":           str(p.get("pair", "WETH:USDso")),  # comma list = auto-rotate to cheapest
             "CLIMB_TARGET_VOLUME":   str(p["target"]),
             "CLIMB_LEG_USD":         str(p["leg"]),
@@ -152,6 +169,8 @@ class EngineManager:
             # Arena weekly cap (0 = off). Boosts travel via data/boosts.json, not env.
             "CLIMB_WEEKLY_TARGET":   str(p.get("weekly_target", 0)),
         }
+        env.update(self._dyn_leg_env(p, "CLIMB"))
+        return env
 
     def _fast_env(self, p: dict) -> dict:
         # Mirrors direct_burst.sh.
@@ -201,6 +220,7 @@ class EngineManager:
             "ATOM_SOMI_FLOOR":       str(p.get("somi_floor", 3)),
             "ATOM_TX_MODE":          str(p.get("tx_mode", "type2")),
         }
+        env.update(self._dyn_leg_env(p, "ATOM"))
         delegate = p.get("delegate")
         if not delegate:
             try:
