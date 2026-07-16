@@ -146,6 +146,59 @@
         .btn-warning { background: var(--c-warning) !important; color: #0b0e14 !important; border-color: var(--c-warning) !important; font-weight: 700; }
         .btn-danger  { background: var(--c-danger)  !important; color: #ffffff !important; border-color: var(--c-danger)  !important; font-weight: 700; }
 
+        /* ── mode selector: scannable cards (name + engine file) ── */
+        .mode-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+            gap: 0.6rem;
+        }
+        .mode-card {
+            display: flex; flex-direction: column; gap: 0.15rem;
+            text-align: left;
+            padding: 0.65rem 0.8rem;
+            border: 1px solid var(--c-border);
+            background: var(--c-surface-2);
+            color: var(--c-text-dim);
+            cursor: pointer;
+            font-family: inherit;
+            appearance: none; -webkit-appearance: none;
+            transition: border-color .14s, background .14s, color .14s, box-shadow .14s;
+        }
+        .mode-card:hover:not(.btn-active) {
+            border-color: var(--c-border-strong);
+            background: var(--c-border);
+            color: var(--c-text);
+        }
+        .mode-card .mc-name { font-family: ui-monospace, Menlo, Monaco, monospace; font-weight: 700; font-size: 0.92rem; letter-spacing: 0.03em; }
+        .mode-card .mc-sub  { font-family: ui-monospace, Menlo, Monaco, monospace; font-size: 0.64rem; color: var(--c-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+        /* Active mode: a calm accent wash + rail, not the loud inverse of btn-active. */
+        .mode-card.btn-active {
+            background: color-mix(in srgb, var(--c-accent) 13%, var(--c-surface-2)) !important;
+            border-color: var(--c-accent) !important;
+            color: var(--c-text) !important;
+            box-shadow: inset 3px 0 0 0 var(--c-accent);
+        }
+        .mode-card.btn-active .mc-sub { color: var(--c-accent); }
+
+        /* ── launch config: aligned responsive grid instead of ragged wrap ── */
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 0.95rem 1rem;
+            align-items: end;
+        }
+        .field { display: flex; flex-direction: column; gap: 0.32rem; min-width: 0; }
+        .field-label {
+            font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em;
+            color: var(--c-muted); line-height: 1.15;
+        }
+        .field .input-base { width: 100%; }
+        .field-wide { grid-column: span 2; }
+        @media (max-width: 560px) { .field-wide { grid-column: span 1; } }
+        /* segmented button groups (mode/pairs) stretch to fill their cell evenly */
+        .seg-group { display: flex; width: 100%; }
+        .seg-group > button { flex: 1 1 0; padding-left: 0; padding-right: 0; }
+
         /* ── tables ─────────────────────────────────────── */
         .table-row { border-bottom: 1px solid var(--c-border); }
         .table-row:last-child { border-bottom: none; }
@@ -202,70 +255,77 @@
                 <span id="lock-note" class="text-textMuted normal-case" style="text-transform:none; font-size:11px"></span>
             </div>
             <div class="panel-body flex flex-col gap-4">
-                <!-- Mode toggle -->
-                <div class="flex flex-wrap items-end gap-4">
-                    <div class="flex flex-col gap-1">
-                        <span class="text-xs text-textMuted uppercase">Mode</span>
-                        <div class="flex border border-border" id="mode-group">
-                            <button class="btn-base border-none px-3 py-1 text-sm btn-active" data-mode="steady" onclick="setMode('steady')" title="Cost-aware REST round-trips. Pauses on wide spread / high $-per-1k.">STEADY · volume_climb</button>
-                            <button class="btn-base border-none border-l border-border px-3 py-1 text-sm" data-mode="fast" onclick="setMode('fast')" title="Direct placeOrder calldata, ~2× faster. Max throughput.">FAST · direct_burst</button>
-                            <button class="btn-base border-none border-l border-border px-3 py-1 text-sm" data-mode="maker" onclick="setMode('maker')" title="Two-sided PostOnly quotes — earns the spread, near-zero bleed. Volume limited by real flow. Target 0 = run until stopped.">MAKER · maker_v2</button>
-                            <button class="btn-base border-none border-l border-border px-3 py-1 text-sm" data-mode="atomic" onclick="setMode('atomic')" title="EIP-7702 buy+sell in ONE tx — no drift, no bag, ~3× gas-efficient. Multi-pair rotation + boosts + weekly like steady. R4 only (Arena fair-play poison).">ATOMIC · 7702</button>
-                        </div>
+                <!-- Mode selector -->
+                <div class="flex flex-col gap-2">
+                    <span class="text-xs text-textMuted uppercase" style="letter-spacing:0.05em">Engine mode</span>
+                    <div class="mode-grid" id="mode-group">
+                        <button class="mode-card btn-active" data-mode="steady" onclick="setMode('steady')" title="Cost-aware REST round-trips. Pauses on wide spread / high $-per-1k.">
+                            <span class="mc-name">STEADY</span><span class="mc-sub">volume_climb</span>
+                        </button>
+                        <button class="mode-card" data-mode="fast" onclick="setMode('fast')" title="Direct placeOrder calldata, ~2× faster. Max throughput.">
+                            <span class="mc-name">FAST</span><span class="mc-sub">direct_burst</span>
+                        </button>
+                        <button class="mode-card" data-mode="maker" onclick="setMode('maker')" title="Two-sided PostOnly quotes — earns the spread, near-zero bleed. Volume limited by real flow. Target 0 = run until stopped.">
+                            <span class="mc-name">MAKER</span><span class="mc-sub">maker_v2</span>
+                        </button>
+                        <button class="mode-card" data-mode="atomic" onclick="setMode('atomic')" title="EIP-7702 buy+sell in ONE tx — no drift, no bag, ~3× gas-efficient. Multi-pair rotation + boosts + weekly like steady. R4 only (Arena fair-play poison).">
+                            <span class="mc-name">ATOMIC</span><span class="mc-sub">7702</span>
+                        </button>
                     </div>
-                    <p id="mode-help" class="text-xs text-textMuted flex-1 min-w-[200px] leading-snug"></p>
+                    <p id="mode-help" class="text-xs text-textMuted leading-snug"></p>
                 </div>
 
-                <!-- Tunables -->
-                <div class="flex flex-wrap gap-4 items-end border-t border-border pt-4">
-                    <div class="flex flex-col gap-1">
-                        <span class="text-xs text-textMuted uppercase">Pairs</span>
-                        <div class="flex border border-border" id="pair-group" title="STEADY rotates across every selected pair (trades the cheapest book each trip). FAST takes exactly one.">
-                            <button class="btn-base border-none px-3 py-1 text-sm btn-active" data-pair="WBTC:USDso" onclick="togglePair(this)">WBTC</button>
-                            <button class="btn-base border-none border-l border-border px-3 py-1 text-sm btn-active" data-pair="WETH:USDso" onclick="togglePair(this)">WETH</button>
-                            <button class="btn-base border-none border-l border-border px-3 py-1 text-sm" data-pair="SOMI:USDso" onclick="togglePair(this)" title="native-base pair — STEADY rotation excludes it; FAST only">SOMI</button>
+                <!-- Run configuration -->
+                <div class="border-t border-border pt-4">
+                    <div class="config-grid">
+                        <div class="field field-wide">
+                            <span class="field-label">Pairs</span>
+                            <div class="seg-group border border-border" id="pair-group" title="STEADY rotates across every selected pair (trades the cheapest book each trip). FAST takes exactly one.">
+                                <button class="btn-base border-none px-3 py-1 text-sm btn-active" data-pair="WBTC:USDso" onclick="togglePair(this)">WBTC</button>
+                                <button class="btn-base border-none border-l border-border px-3 py-1 text-sm btn-active" data-pair="WETH:USDso" onclick="togglePair(this)">WETH</button>
+                                <button class="btn-base border-none border-l border-border px-3 py-1 text-sm" data-pair="SOMI:USDso" onclick="togglePair(this)" title="native-base pair — STEADY rotation excludes it; FAST only">SOMI</button>
+                            </div>
                         </div>
-                    </div>
-                    <div class="flex flex-col gap-1">
-                        <label class="text-xs text-textMuted uppercase">Target volume ($)</label>
-                        <input id="f_target" type="number" class="input-base w-32" value="100000">
-                    </div>
-                    <div class="flex flex-col gap-1">
-                        <label class="text-xs text-textMuted uppercase">Leg ($)</label>
-                        <input id="f_leg" type="number" class="input-base w-24" value="25" oninput="checkLeg()">
-                        <span id="f_leg_max" class="font-mono" style="font-size:10px;color:var(--c-muted)" title="a leg above 0.8× free USDso pre-reverts on the first buy">max —</span>
-                    </div>
-                    <div class="flex flex-col gap-1 mode-steady mode-atomic">
-                        <label class="text-xs text-textMuted uppercase" title="Fill BOTH min and max to size each leg to book depth (touch-fit): bigger on deep books (less gas), smaller on thin (less toll). Leave blank to use the fixed Leg.">Dyn leg $ (min/max)</label>
-                        <div class="flex gap-1 items-center">
-                            <input id="f_legmin" type="number" class="input-base w-16" placeholder="min" oninput="checkLeg()">
-                            <input id="f_legmax" type="number" class="input-base w-16" placeholder="max" oninput="checkLeg()">
-                            <input id="f_touch" type="number" step="0.05" class="input-base w-14" placeholder="0.8" title="fraction of touch depth to take (default 0.8)">
+                        <div class="field">
+                            <label class="field-label" for="f_target">Target volume ($)</label>
+                            <input id="f_target" type="number" class="input-base" value="100000">
                         </div>
-                    </div>
-                    <div class="flex flex-col gap-1">
-                        <label class="text-xs text-textMuted uppercase">Slip</label>
-                        <input id="f_slip" type="number" step="0.001" class="input-base w-24" placeholder="0.003">
-                    </div>
-                    <div class="flex flex-col gap-1 mode-steady mode-maker mode-atomic">
-                        <label class="text-xs text-textMuted uppercase">Bleed cap ($)</label>
-                        <input id="f_bleed" type="number" class="input-base w-24" value="40">
-                    </div>
-                    <div class="flex flex-col gap-1 mode-maker hidden">
-                        <label class="text-xs text-textMuted uppercase">Inv cap ($/pair)</label>
-                        <input id="f_cap" type="number" class="input-base w-24" value="40" title="max base inventory per pair; the maker oscillates below this">
-                    </div>
-                    <div class="flex flex-col gap-1 mode-steady mode-atomic">
-                        <label class="text-xs text-textMuted uppercase">Cost ceil $/1k</label>
-                        <input id="f_cost" type="number" step="0.01" class="input-base w-24" value="0.15" title="pre-trade book-implied toll ceiling — pause a pair dearer than this (0/blank = off for atomic)">
-                    </div>
-                    <div class="flex flex-col gap-1 mode-atomic hidden">
-                        <label class="text-xs text-textMuted uppercase">Toll cap $/1k</label>
-                        <input id="f_toll" type="number" step="0.01" class="input-base w-24" value="0.30" title="max net quote lost per $1k of round-trip volume; a trip that would exceed it reverts on-chain">
-                    </div>
-                    <div class="flex flex-col gap-1">
-                        <label class="text-xs text-textMuted uppercase">Spread gate %</label>
-                        <input id="f_gate" type="number" step="0.01" class="input-base w-24" placeholder="0.05" title="skip trips while the pair's effective spread is above this — blank = engine default">
+                        <div class="field">
+                            <label class="field-label" for="f_leg">Leg ($) <span style="color:var(--c-faint)">·</span> <span id="f_leg_max" class="font-mono" style="font-size:10px;color:var(--c-muted);text-transform:none" title="a leg above 0.8× free USDso pre-reverts on the first buy">max —</span></label>
+                            <input id="f_leg" type="number" class="input-base" value="25" oninput="checkLeg()">
+                        </div>
+                        <div class="field field-wide mode-steady mode-atomic">
+                            <label class="field-label" title="Fill BOTH min and max to size each leg to book depth (touch-fit): bigger on deep books (less gas), smaller on thin (less toll). Leave blank to use the fixed Leg.">Dynamic leg $ — min / max / touch-frac</label>
+                            <div class="flex gap-2 items-center">
+                                <input id="f_legmin" type="number" class="input-base" style="flex:1;min-width:0" placeholder="min" oninput="checkLeg()">
+                                <input id="f_legmax" type="number" class="input-base" style="flex:1;min-width:0" placeholder="max" oninput="checkLeg()">
+                                <input id="f_touch" type="number" step="0.05" class="input-base" style="flex:1;min-width:0" placeholder="0.8" title="fraction of touch depth to take (default 0.8)">
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label class="field-label" for="f_slip">Slip</label>
+                            <input id="f_slip" type="number" step="0.001" class="input-base" placeholder="0.003">
+                        </div>
+                        <div class="field mode-steady mode-maker mode-atomic">
+                            <label class="field-label" for="f_bleed">Bleed cap ($)</label>
+                            <input id="f_bleed" type="number" class="input-base" value="40">
+                        </div>
+                        <div class="field mode-maker hidden">
+                            <label class="field-label" for="f_cap">Inv cap ($/pair)</label>
+                            <input id="f_cap" type="number" class="input-base" value="40" title="max base inventory per pair; the maker oscillates below this">
+                        </div>
+                        <div class="field mode-steady mode-atomic">
+                            <label class="field-label" for="f_cost">Cost ceil $/1k</label>
+                            <input id="f_cost" type="number" step="0.01" class="input-base" value="0.15" title="pre-trade book-implied toll ceiling — pause a pair dearer than this (0/blank = off for atomic)">
+                        </div>
+                        <div class="field mode-atomic hidden">
+                            <label class="field-label" for="f_toll">Toll cap $/1k</label>
+                            <input id="f_toll" type="number" step="0.01" class="input-base" value="0.30" title="max net quote lost per $1k of round-trip volume; a trip that would exceed it reverts on-chain">
+                        </div>
+                        <div class="field">
+                            <label class="field-label" for="f_gate">Spread gate %</label>
+                            <input id="f_gate" type="number" step="0.01" class="input-base" placeholder="0.05" title="skip trips while the pair's effective spread is above this — blank = engine default">
+                        </div>
                     </div>
                 </div>
 
