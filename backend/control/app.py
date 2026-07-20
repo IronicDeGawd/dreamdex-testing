@@ -131,6 +131,10 @@ class MockBackend:
     def gas_topup(self, somi_usdso):
         return {"status": "success", "mock": True, "spent_usdso": somi_usdso}
 
+    def convert_stable(self, amount, direction):
+        return {"status": "success", "mock": True,
+                "direction": direction, "qty_usdce": amount}
+
     def flatten(self):
         return {"status": "flat", "mock": True, "weth": 0.0}
 
@@ -300,6 +304,50 @@ class LiveBackend:
         return {"status": res.get("status"), "somi_qty": qty,
                 "spent_usdso": somi_usdso, "result": res}
 
+    def convert_stable(self, amount, direction):
+        # USDC.e <-> USDso on the USDC.e:USDso book. IOC crossing the touch, so it
+        # fills at ~1:1 (spread is a fraction of a cent). amount <= 0 converts the
+        # whole free balance. Qty is snapped DOWN to the lot or the pool rejects it.
+        import math
+        PAIR = "USDC.e:USDso"
+        m = self.cfg.MARKETS.get(PAIR)
+        if not m:
+            return {"status": "error", "error": f"no {PAIR} market"}
+        ob = self.dex.get_orderbook(PAIR)
+        bid, ask = ob.get("bid"), ob.get("ask")
+        if not bid or not ask:
+            return {"status": "error", "error": f"no {PAIR} book"}
+        lot = float(m.get("lotSize", 0.01)) or 0.01
+        minq = float(m.get("minQuantity", lot) or lot)
+        tick = float(m.get("tickSize", 0.0001)) or 0.0001
+        bdec, qdec = int(m["baseDecimals"]), int(m["quoteDecimals"])
+        w = self.dex.wallet
+
+        if direction == "usdce_to_usdso":
+            held = w.erc20_balance(m["base"], bdec)
+            want = held if amount <= 0 else min(amount, held)
+            qty = round(math.floor(want / lot) * lot, 10)
+            if qty < minq:
+                return {"status": "error",
+                        "error": f"{qty} USDC.e below min order {minq} (held {held})"}
+            px = round(math.floor(bid * 0.999 / tick) * tick, 10)
+            res = self.dex.place_order(PAIR, "sell", qty, order_type="ioc",
+                                       limit_price=px, funding="wallet")
+        elif direction == "usdso_to_usdce":
+            free = w.erc20_balance(self.cfg.USDSO_ADDRESS, qdec)
+            spend = free if amount <= 0 else min(amount, free)
+            px = round(math.ceil(ask * 1.001 / tick) * tick, 10)
+            qty = round(math.floor((spend / px) / lot) * lot, 10)
+            if qty < minq:
+                return {"status": "error",
+                        "error": f"${spend} buys {qty} USDC.e, below min order {minq}"}
+            res = self.dex.place_order(PAIR, "buy", qty, order_type="ioc",
+                                       limit_price=px, funding="wallet")
+        else:
+            return {"status": "error", "error": f"unknown direction {direction}"}
+        return {"status": res.get("status"), "direction": direction,
+                "qty_usdce": qty, "limit": px, "result": res}
+
     def flatten(self):
         # Sell any base bag on EVERY ERC20 pair, then RE-CHECK the balance and
         # RETRY with widening slip. Reports "flat" only if every pair is confirmed
@@ -393,6 +441,11 @@ class LoginBody(BaseModel):
 
 class GasBody(BaseModel):
     somi_usdso: float               # USDso to spend on SOMI gas
+
+
+class ConvertBody(BaseModel):
+    amount: float = 0.0             # <= 0 converts the whole free balance
+    direction: str = "usdce_to_usdso"   # or "usdso_to_usdce"
 
 
 class TradeBody(BaseModel):
@@ -689,6 +742,21 @@ def gas_topup(body: GasBody, _=Depends(require_key)):
     engine.audit("gas_topup", {"somi_usdso": body.somi_usdso})
     try:
         return backend.gas_topup(body.somi_usdso)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.post("/convert")
+def convert_stable(body: ConvertBody, _=Depends(require_key)):
+    if engine.is_running():
+        raise HTTPException(status_code=409,
+                            detail="engine running — stop it first (nonce safety)")
+    if body.direction not in ("usdce_to_usdso", "usdso_to_usdce"):
+        raise HTTPException(status_code=400,
+                            detail="direction must be usdce_to_usdso or usdso_to_usdce")
+    engine.audit("convert_stable", body.model_dump())
+    try:
+        return backend.convert_stable(body.amount, body.direction)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
