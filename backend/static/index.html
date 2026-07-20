@@ -723,7 +723,7 @@ async function refreshStatus(){
     $("lock-note").textContent = run ? "engine running — one at a time" : "";
   }catch(e){ setConn(false, e.message.slice(0,20)); }
 }
-let _maxLeg = null;   // 0.8 × free USDso — the launch guard's ceiling
+let _maxLeg = null;   // leg_cap_frac × free USDso — the launch guard's ceiling
 async function refreshBalances(){
   try{
     const b=await api("/balances");
@@ -735,7 +735,7 @@ async function refreshBalances(){
     $("b_wbtc").textContent=fmt(b.wbtc,8); $("b_weth").textContent=fmt(b.weth,6);
     $("b_wbtc").className = b.wbtc>0 ? "text-warning" : "";
     $("b_weth").className = b.weth>0 ? "text-warning" : "";
-    if(b.usdso!=null){ _maxLeg = 0.8 * b.usdso; checkLeg(); }
+    if(b.usdso!=null){ _maxLeg = (b.leg_cap_frac ?? 0.9) * b.usdso; checkLeg(); }
   }catch(e){}
 }
 // Show (and validate against) the biggest leg the launch guard will accept:
