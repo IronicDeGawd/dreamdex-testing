@@ -433,6 +433,25 @@
                 </div>
             </section>
 
+            <!-- Stablecoin convert -->
+            <section class="panel flex flex-col">
+                <div class="panel-header">Stablecoin Convert</div>
+                <div class="panel-body flex items-end gap-3">
+                    <div class="flex flex-col gap-1">
+                        <label class="text-xs text-textMuted uppercase">Direction</label>
+                        <select id="c_dir" class="input-base w-44 cursor-pointer">
+                            <option value="usdce_to_usdso">USDC.e → USDso</option>
+                            <option value="usdso_to_usdce">USDso → USDC.e</option>
+                        </select>
+                    </div>
+                    <div class="flex flex-col gap-1 flex-1">
+                        <label class="text-xs text-textMuted uppercase">Amount (0 = all)</label>
+                        <input id="c_amt" type="number" class="input-base w-full" value="0">
+                    </div>
+                    <button class="btn-base btn-warning font-bold px-4 py-[0.35rem] h-[34px]" onclick="confirmConvert()">CONVERT</button>
+                </div>
+            </section>
+
             <!-- Safety & Manual -->
             <section class="panel flex flex-col">
                 <div class="panel-header">Safety &amp; Manual</div>
@@ -637,6 +656,16 @@ function confirmGas(){
   modal("Gas top-up",`Spend $${amt} USDso to buy SOMI for gas?`,
     async()=>{ try{ const r=await api("/gas/topup",{method:"POST",body:JSON.stringify({somi_usdso:amt})});
       toast("Gas: "+(r.status||"done")); refreshBalances(); }catch(e){ toast("✗ "+e.message); } },
+    "warning");
+}
+function confirmConvert(){
+  const dir=$("c_dir").value, amt=+$("c_amt").value;
+  const label=dir==="usdce_to_usdso"?"USDC.e → USDso":"USDso → USDC.e";
+  const how=amt>0?`$${amt}`:"the ENTIRE free balance";
+  modal("Stablecoin convert",`Convert ${how} · ${label}? Fills at ~1:1 via IOC.`,
+    async()=>{ try{ const r=await api("/convert",{method:"POST",body:JSON.stringify({amount:amt,direction:dir})});
+      toast(r.status==="error"?("✗ "+r.error):("Converted: "+(r.status||"done")+" · "+(r.qty_usdce??"")+" USDC.e"));
+      refreshBalances(); }catch(e){ toast("✗ "+e.message); } },
     "warning");
 }
 function confirmFlatten(){
