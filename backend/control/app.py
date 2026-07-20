@@ -40,6 +40,12 @@ from control.engine_manager import EngineManager, EngineError, MOCK, STATE_DIR
 # be traded (removal risk). Enforced at /launch and /trade so it can't be entered.
 ELIGIBLE_PAIRS = {"WBTC:USDso", "WETH:USDso", "SOMI:USDso"}
 
+# Largest leg we allow as a fraction of free USDso. A buy locks collateral at the
+# LIMIT price (above mid by the slip), not at mid, so a nominal $X leg needs more
+# than $X on hand; the rest of the margin absorbs price drift between reading the
+# balance and the tx landing. Above this the first buy pre-reverts and burns gas.
+LEG_CAP_FRAC = 0.9
+
 # Idle-DQ keepalive (contest rule: >24h without a trade = DQ). A cron hits
 # POST /keepalive hourly; we act only when lifetime volume hasn't moved for
 # KEEPALIVE_AGE_S. 20h + hourly cron ⇒ worst-case trade at ~21h idle, inside 24h.
@@ -512,7 +518,9 @@ def status(_=Depends(require_key)):
 
 @app.get("/balances")
 def balances(_=Depends(require_key)):
-    return backend.balances()
+    # Ship the leg cap fraction so the dashboard's max-leg hint tracks the
+    # server guard instead of duplicating the number.
+    return {**backend.balances(), "leg_cap_frac": LEG_CAP_FRAC}
 
 
 @app.get("/leaderboard")
@@ -593,11 +601,12 @@ def launch(body: LaunchBody, _=Depends(require_key)):
     if body.leg_max and body.leg_min and body.leg_max >= body.leg_min > 0:
         guard_leg = body.leg_max
         guard_name = "leg_max"
-    if free is not None and guard_leg > 0.8 * free:
+    if free is not None and guard_leg > LEG_CAP_FRAC * free:
         raise HTTPException(
             status_code=400,
-            detail=f"{guard_name} ${guard_leg:.2f} exceeds 0.8× free USDso (${free:.2f}) — "
-                   f"buys would pre-revert; use {guard_name} ≤ ${0.8 * free:.2f}",
+            detail=f"{guard_name} ${guard_leg:.2f} exceeds {LEG_CAP_FRAC}× free USDso "
+                   f"(${free:.2f}) — buys would pre-revert; "
+                   f"use {guard_name} ≤ ${LEG_CAP_FRAC * free:.2f}",
         )
 
     try:
@@ -683,8 +692,8 @@ def autorestart(_=Depends(require_key)):
     # relaunch can't trip the pre-revert guard.
     try:
         free = backend.free_usdso()
-        if free and params.get("leg", 0) > 0.8 * free:
-            params["leg"] = round(0.8 * free, 2)
+        if free and params.get("leg", 0) > LEG_CAP_FRAC * free:
+            params["leg"] = round(LEG_CAP_FRAC * free, 2)
     except Exception:
         pass
     try:
