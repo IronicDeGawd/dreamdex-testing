@@ -44,7 +44,7 @@ ELIGIBLE_PAIRS = {"WBTC:USDso", "WETH:USDso", "SOMI:USDso"}
 # LIMIT price (above mid by the slip), not at mid, so a nominal $X leg needs more
 # than $X on hand; the rest of the margin absorbs price drift between reading the
 # balance and the tx landing. Above this the first buy pre-reverts and burns gas.
-LEG_CAP_FRAC = 0.9
+LEG_CAP_FRAC = 0.95
 
 # Idle-DQ keepalive (contest rule: >24h without a trade = DQ). A cron hits
 # POST /keepalive hourly; we act only when lifetime volume hasn't moved for
