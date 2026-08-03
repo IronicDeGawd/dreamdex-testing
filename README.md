@@ -8,7 +8,8 @@ each round adding an engine or a piece of control tooling.
 added the **atomic (EIP-7702) taker** and **depth-aware dynamic leg sizing** — the
 big-leg atomic engine amortizes the fixed per-tx gas over much larger round-trips,
 pushing throughput to ~$130k/hr on a deep book while the toll stays at the spread
-floor.
+floor. Builder feedback for the team in
+[`reports/DreamDEX-R4-Feedback.docx`](reports/DreamDEX-R4-Feedback.docx).
 
 **Round 3** (volume contest): finished **#2 of 6** on raw volume at **~1,086,202
 USDso**, and among the **most capital-efficient** traders in the field (~98% fill).
@@ -133,20 +134,34 @@ Telegram token, control API key. **This repo may be public; never commit `.env`.
 
 ---
 
-## Historical: R1 findings & dataset
+## Reports & deliverables, by round
 
-The R1 round doubled as a protocol stress test. Deliverables in [`reports/`](reports/):
+Everything under [`reports/`](reports/).
 
-- **[`FINDINGS.md`](reports/FINDINGS.md)** — protocol findings for the DreamDEX team,
-  several confirmed by their dev (e.g. `expireTimestampNs=0` silently rejected; a
-  non-standard native-SOMI vault sentinel; `OrderPlaced` emitting `filled=0` on real
-  fills; ~47% `eth_call` pre-trade false-negatives; an ~8.9-minute exchange-wide
-  liquidity blackout).
-- **[`reports/analysis/`](reports/analysis/)** — tens of thousands of on-chain
-  transactions scraped and analyzed (fill rates, PnL, reverts).
+**Round 1 — protocol stress test.** The round doubled as a mainnet stress test.
+- **[`FINDINGS.md`](reports/FINDINGS.md)** / **[`DreamDEX-Findings.docx`](reports/DreamDEX-Findings.docx)**
+  — protocol findings for the DreamDEX team, several confirmed by their dev
+  (`expireTimestampNs=0` silently rejected; a non-standard native-SOMI vault
+  sentinel; `OrderPlaced` emitting `filled=0` on real fills; ~47% `eth_call`
+  pre-trade false-negatives; an ~8.9-minute exchange-wide liquidity blackout).
+- **[`DreamDEX-Trade-Analysis.docx`](reports/DreamDEX-Trade-Analysis.docx)** +
+  **[`reports/analysis/`](reports/analysis/)** — tens of thousands of on-chain
+  transactions scraped and analyzed (fill rates, PnL, reverts), with the tooling.
 - **[`reports/evidence/`](reports/evidence/)** — block-by-block proof of the blackout.
 
-Lessons that carry into every round: trade the tightest-spread pair, wallet-funded
+**Round 2.** No standalone report — the round's output fed directly into the R3
+engine work (cost-aware gating, the tightest-spread-pair rule).
+
+**Round 3 — volume contest, #2 of 6.**
+- **[`R3-report.docx`](reports/R3-report.docx)** — transaction & performance report.
+- **[`R3-transaction-report.md`](reports/R3-transaction-report.md)** — the same in Markdown.
+
+**Round 4 — volume contest, 1.5M volume.**
+- **[`DreamDEX-R4-Feedback.docx`](reports/DreamDEX-R4-Feedback.docx)** — builder
+  feedback for the team (leaderboard PnL vs. stablecoin swaps, RPC reliability,
+  collateral-at-limit-price, book-depth variance).
+
+Lessons that carry across rounds: trade the tightest-spread pair, wallet-funded
 orders only (vault IOC never fills), read the capital floor from live RPC not a
 cache, clamp trade size in code, and — the R4 lesson — size each leg to the book so
 fixed gas is amortized, not multiplied.
