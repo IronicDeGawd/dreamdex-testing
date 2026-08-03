@@ -35,28 +35,44 @@ class FailoverHTTPProvider(HTTPProvider):
     caller only sees an error if EVERY node fails. JSON-RPC errors (revert,
     nonce too low) come back as a normal response dict — those are real chain
     answers, identical on every node, so they pass straight through without
-    failover. Sticks to the last good endpoint until it too fails."""
+    failover. The next request starts from the next endpoint instead of
+    staying pinned to the same URI forever."""
 
     def __init__(self, endpoint_uris, **kwargs):
         self._uris = list(endpoint_uris) or [None]
         self._idx = 0
+        self._lock = threading.Lock()
         super().__init__(self._uris[0], **kwargs)
 
     def make_request(self, method, params):
         last_exc = None
         n = len(self._uris)
+        with self._lock:
+            start_idx = self._idx
+
+        tried = []
         for attempt in range(n):
-            i = (self._idx + attempt) % n
-            self.endpoint_uri = self._uris[i]
+            i = (start_idx + attempt) % n
+            uri = self._uris[i]
+            tried.append(uri)
+            self.endpoint_uri = uri
             try:
                 resp = super().make_request(method, params)
-                if i != self._idx:
-                    print(f"[wallet] RPC failover → {self._uris[i]}")
-                self._idx = i  # stick here until it fails
+                # Rotate the starting point so the next request does not pin to
+                # the same endpoint forever.
+                with self._lock:
+                    self._idx = (i + 1) % n
+                if i != start_idx:
+                    print(f"[wallet] RPC failover → {uri}")
                 return resp
             except Exception as e:  # transport-level only; RPC errors return a dict
                 last_exc = e
                 continue
+
+        tried_str = " -> ".join(tried) if tried else "<none>"
+        print(f"[wallet] RPC failover exhausted ({tried_str})")
+        with self._lock:
+            self._idx = (start_idx + 1) % n
         raise last_exc
 
 
