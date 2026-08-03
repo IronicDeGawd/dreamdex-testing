@@ -1,6 +1,6 @@
 # DreamDEX Campaign — Complete On-Chain Trade Analysis
 
-**Wallet:** `0xF4c825F3C2970153d78B407CF190861dd4E2b905` (handle `trader-9`)
+**Wallet:** `0x0000000000000000000000000000000000000000` (handle `trader-9`)
 **Network:** Somnia mainnet (chain 5031)
 **Dataset:** 63,569 transactions, 2026-05-26 → 2026-06-01, scraped from chain (Blockscout v2)
 **Source:** `analysis/onchain_trades.db`; regenerate via `analysis/scrape_trades.py`, analyse via `analysis/analyze_full.py`

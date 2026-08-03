@@ -1,6 +1,6 @@
 # On-chain trade dataset & analysis
 
-Complete on-chain trade history for wallet `0xF4c825F3C2970153d78B407CF190861dd4E2b905`,
+Complete on-chain trade history for wallet `0x0000000000000000000000000000000000000000`,
 scraped from the Somnia mainnet Blockscout v2 API (the direct-burst engine fires
 raw RPC and never logged to `agent.db`, so the chain is the only complete record).
 

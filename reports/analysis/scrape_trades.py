@@ -28,7 +28,7 @@ import time
 
 import requests
 
-WALLET = "0xF4c825F3C2970153d78B407CF190861dd4E2b905"
+WALLET = "0x0000000000000000000000000000000000000000"
 EXPLORER = "https://mainnet.somnia.w3us.site"
 DB = "/app/data/onchain_trades.db"
 

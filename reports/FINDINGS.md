@@ -1,6 +1,6 @@
 # DreamDEX Mainnet Stress Test — Findings, Methods & Bleed Analysis
 
-**Participant wallet:** `0xF4c825F3C2970153d78B407CF190861dd4E2b905` (leaderboard handle `trader-9`)
+**Participant wallet:** `0x0000000000000000000000000000000000000000` (leaderboard handle `trader-9`)
 **Network:** Somnia mainnet (chain 5031)
 **Engagement:** 2026-05-27 → 2026-06-01
 **Scale exercised:** 51,000+ on-chain transactions + 8,189 instrumented trades (local DB) + 552 order-book ticks
