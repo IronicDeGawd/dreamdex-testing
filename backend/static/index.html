@@ -433,6 +433,25 @@
                 </div>
             </section>
 
+            <!-- Stablecoin convert -->
+            <section class="panel flex flex-col">
+                <div class="panel-header">Stablecoin Convert</div>
+                <div class="panel-body flex items-end gap-3">
+                    <div class="flex flex-col gap-1">
+                        <label class="text-xs text-textMuted uppercase">Direction</label>
+                        <select id="c_dir" class="input-base w-44 cursor-pointer">
+                            <option value="usdce_to_usdso">USDC.e → USDso</option>
+                            <option value="usdso_to_usdce">USDso → USDC.e</option>
+                        </select>
+                    </div>
+                    <div class="flex flex-col gap-1 flex-1">
+                        <label class="text-xs text-textMuted uppercase">Amount (0 = all)</label>
+                        <input id="c_amt" type="number" class="input-base w-full" value="0">
+                    </div>
+                    <button class="btn-base btn-warning font-bold px-4 py-[0.35rem] h-[34px]" onclick="confirmConvert()">CONVERT</button>
+                </div>
+            </section>
+
             <!-- Safety & Manual -->
             <section class="panel flex flex-col">
                 <div class="panel-header">Safety &amp; Manual</div>
@@ -639,6 +658,16 @@ function confirmGas(){
       toast("Gas: "+(r.status||"done")); refreshBalances(); }catch(e){ toast("✗ "+e.message); } },
     "warning");
 }
+function confirmConvert(){
+  const dir=$("c_dir").value, amt=+$("c_amt").value;
+  const label=dir==="usdce_to_usdso"?"USDC.e → USDso":"USDso → USDC.e";
+  const how=amt>0?`$${amt}`:"the ENTIRE free balance";
+  modal("Stablecoin convert",`Convert ${how} · ${label}? Fills at ~1:1 via IOC.`,
+    async()=>{ try{ const r=await api("/convert",{method:"POST",body:JSON.stringify({amount:amt,direction:dir})});
+      toast(r.status==="error"?("✗ "+r.error):("Converted: "+(r.status||"done")+" · "+(r.qty_usdce??"")+" USDC.e"));
+      refreshBalances(); }catch(e){ toast("✗ "+e.message); } },
+    "warning");
+}
 function confirmFlatten(){
   modal("Flatten","Sell ALL inventory (WBTC + WETH) back to USDso now?",
     async()=>{ try{ const r=await api("/flatten",{method:"POST"});
@@ -694,7 +723,7 @@ async function refreshStatus(){
     $("lock-note").textContent = run ? "engine running — one at a time" : "";
   }catch(e){ setConn(false, e.message.slice(0,20)); }
 }
-let _maxLeg = null;   // 0.8 × free USDso — the launch guard's ceiling
+let _maxLeg = null;   // leg_cap_frac × free USDso — the launch guard's ceiling
 async function refreshBalances(){
   try{
     const b=await api("/balances");
@@ -706,7 +735,7 @@ async function refreshBalances(){
     $("b_wbtc").textContent=fmt(b.wbtc,8); $("b_weth").textContent=fmt(b.weth,6);
     $("b_wbtc").className = b.wbtc>0 ? "text-warning" : "";
     $("b_weth").className = b.weth>0 ? "text-warning" : "";
-    if(b.usdso!=null){ _maxLeg = 0.8 * b.usdso; checkLeg(); }
+    if(b.usdso!=null){ _maxLeg = (b.leg_cap_frac ?? 0.95) * b.usdso; checkLeg(); }
   }catch(e){}
 }
 // Show (and validate against) the biggest leg the launch guard will accept:

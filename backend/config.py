@@ -147,10 +147,10 @@ if ENV == "mainnet":
     # Failover pool: the primary infra node is flaky under sustained load, so a
     # single blip no longer surfaces as an error — the provider rotates to a
     # healthy public node instead. Override/extend via SOMNIA_RPC_FALLBACKS (CSV).
-    SOMNIA_RPCS   = [SOMNIA_RPC] + [u.strip() for u in os.environ.get(
+    SOMNIA_RPCS   = list(dict.fromkeys([SOMNIA_RPC] + [u.strip() for u in os.environ.get(
         "SOMNIA_RPC_FALLBACKS",
         "https://somnia-rpc.publicnode.com,https://rpc.ankr.com/somnia_mainnet",
-    ).split(",") if u.strip()]
+    ).split(",") if u.strip()]))
     DREAMDEX_HTTP = "https://api.dreamdex.io"
     DREAMDEX_WS   = "wss://api.dreamdex.io/v0/ws/public"
 
@@ -215,8 +215,8 @@ else:
     # ── Testnet (Somnia Shannon, chain ID 50312) ──────────
     CHAIN_ID      = 50312
     SOMNIA_RPC    = "https://api.infra.testnet.somnia.network"
-    SOMNIA_RPCS   = [SOMNIA_RPC] + [u.strip() for u in os.environ.get(
-        "SOMNIA_RPC_FALLBACKS", "").split(",") if u.strip()]
+    SOMNIA_RPCS   = list(dict.fromkeys([SOMNIA_RPC] + [u.strip() for u in os.environ.get(
+        "SOMNIA_RPC_FALLBACKS", "").split(",") if u.strip()]))
     MY_ADDRESS    = "0xe21c64a04562D53EA6AfFeB1c1561e49397B42dd"  # testnet deployer wallet
     PRIVATE_KEY   = os.environ.get("TESTNET_PRIVATE_KEY", "")    # export TESTNET_PRIVATE_KEY=0x...
     DREAMDEX_HTTP = "https://stg.api.dreamdex.io"
