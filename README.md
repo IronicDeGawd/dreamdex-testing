@@ -157,9 +157,10 @@ engine work (cost-aware gating, the tightest-spread-pair rule).
 - **[`R3-transaction-report.md`](reports/R3-transaction-report.md)** — the same in Markdown.
 
 **Round 4 — volume contest, 1.5M volume.**
-- **[`DreamDEX-R4-Feedback.docx`](reports/DreamDEX-R4-Feedback.docx)** — builder
-  feedback for the team (leaderboard PnL vs. stablecoin swaps, RPC reliability,
-  collateral-at-limit-price, book-depth variance).
+- **[`DreamDEX-R4-Feedback.pdf`](reports/DreamDEX-R4-Feedback.pdf)**
+  ([`.docx`](reports/DreamDEX-R4-Feedback.docx)) — builder feedback on the DreamDEX
+  protocol (atomic/zero-fee wins, collateral-at-limit-price, per-pair depth
+  variance, endpoint availability, and the R1 findings carry-over).
 
 Lessons that carry across rounds: trade the tightest-spread pair, wallet-funded
 orders only (vault IOC never fills), read the capital floor from live RPC not a
