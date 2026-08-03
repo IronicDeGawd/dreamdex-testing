@@ -2,7 +2,7 @@
 
 Deployed on `user@<SERVER_HOST>` (Tailscale, also reachable via `ssh user@<SERVER_HOST>`).
 Frontend: `https://<TUNNEL_HOST>` → Cloudflare tunnel → `localhost:5001` on server.
-Wallet: `0xF4c825F3C2970153d78B407CF190861dd4E2b905` (mainnet).
+Wallet: `0x0000000000000000000000000000000000000000` (mainnet).
 Code: `~/dreamdex-agent/` on server.
 
 ## Start / stop / restart

@@ -311,7 +311,7 @@ Same confirmation-modal + log-row pattern as Manual trade.
 ## Hard-coded values you'll need
 
 - **Backend URL**: `https://<TUNNEL_HOST>`
-- **Mainnet wallet** (for display only): `0xF4c825F3C2970153d78B407CF190861dd4E2b905`
+- **Mainnet wallet** (for display only): `0x0000000000000000000000000000000000000000`
 - **Capital floor**: `$22 USDso` (the threshold below which the agent holds)
 - **Initial seed**: `$50 USDso` (used for PnL calc: `total_value - 50`)
 
