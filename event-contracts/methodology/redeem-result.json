@@ -1,0 +1,15 @@
+{
+  "market": "0x0000000000000000000000000000000000000000000000000000000000003e04",
+  "status": "Finalized",
+  "winningOutcome": 1,
+  "voided": false,
+  "steps": [
+    {
+      "redeem": "Down-wins",
+      "outcomeIdx": 1,
+      "amount": "10000000",
+      "tx": "0x4a6774ced9c6bcc74c7141efdf401e6b8f5626f3e0f1cc97dcf68f0ac724db0a",
+      "status": "success"
+    }
+  ]
+}

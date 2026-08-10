@@ -34,11 +34,17 @@ receipts returned:
 | `mintSet` 10 → 10 Up + 10 Down | success | `0xf16cad949ae5729e8d9b34c3ac2298a351ee0b308df3ff4890f925e24ab3fe05` |
 | Maker: rest `SELL Up @0.55 ×5` (PostOnly) | rested, orderId `129127…019` | `0x0b4fc3c4bddb5dc0680c2609e92e3322425738c57e964be40b5e8924f93a44bf` |
 | **Taker: `BUY Up` IOC → matched a real maker** | **filled 3 Up @ 0.045**, taker remaining 0 | `0xbef57a15051c7c3283d555eacbed1c8dd9397a27635d53fb1be5c439cb066bd9` |
+| **Settle → redeem the winning side after resolution** | market **Finalized**, Down won; **redeemed 10 Down → 10 USDC** | `0x4a6774ced9c6bcc74c7141efdf401e6b8f5626f3e0f1cc97dcf68f0ac724db0a` |
 
 Traded market: `0x…3e04` — BTC "closes at or above its opening price", 4h window,
 pool `0x0e7d5043787a567282f48c7d9d3627c917495a2d`, 6-decimal collateral. The
-taker order matched maker `0x7970…A460`'s resting ask at 0.045. **The on-chain
-venue is healthy.**
+taker order matched maker `0x7970…A460`'s resting ask at 0.045.
+
+At expiry the oracle resolved the question **false** (BTC closed *below* its
+opening price), so the market finalized with `winningOutcome: 1` (Down/NO). The
+winning **Down** tokens redeemed 1:1 for collateral; the losing **Up** tokens
+were correctly worth nothing. **The full lifecycle — faucet → mint → maker →
+taker → settle → redeem — works end to end. The on-chain venue is healthy.**
 
 ---
 
@@ -167,5 +173,8 @@ disposable key was written to a git-ignored file and never committed):
 - `trade`/`check.mjs` — outcome balances + full order-book readback
 - `census.mjs` — liquidity census across all trading markets
 - `probe2.mjs` — market-structure / field inspection
+- `settle.mjs` — polls the traded market until the oracle resolves it, then
+  cancels resting orders and redeems the winning side (`redeem-result.json`)
 
-_Settlement / redeem tx is appended once the traded 4h market resolves._
+Settlement resolved on the 4h BTC market: **Finalized, Down won**, redeem tx
+`0x4a6774…db0a` — see `redeem-result.json`.
