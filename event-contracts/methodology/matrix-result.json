@@ -1,0 +1,77 @@
+[
+  {
+    "name": "Market discovery via chain logs (no indexer)",
+    "ok": true,
+    "detail": "12 MarketCreated events; 2 assets"
+  },
+  {
+    "name": "Read market status on-chain (getMarketOnchain)",
+    "ok": true,
+    "detail": "status=1 finalized=false decimals=6"
+  },
+  {
+    "name": "Read order book on-chain (getAllOpenOrdersOnchain)",
+    "ok": true,
+    "detail": "3 bids, 3 asks; makers=1"
+  },
+  {
+    "name": "Price/probability helpers",
+    "ok": true,
+    "detail": "0.62→620000→0.62"
+  },
+  {
+    "name": "faucet TestUSDC (write)",
+    "ok": true,
+    "detail": "0xeab04b91c91ccb3b717553add6b2adeefbd4f6b5904b7accd89cec31cadf54b1"
+  },
+  {
+    "name": "Read outcome balances on-chain (getOutcomeBalance)",
+    "ok": true,
+    "detail": "Up=14 Down=12"
+  },
+  {
+    "name": "mintSet — 1 collateral → 1 Up + 1 Down",
+    "ok": true,
+    "detail": "0x0b34948727f341ea39ea37911918a4b0db28767c431cc56336fc03f1c46e3fdf ΔUp=6 ΔDown=6"
+  },
+  {
+    "name": "burnSet — merge 1 Up + 1 Down → 1 collateral",
+    "ok": true,
+    "detail": "0x078b241c63c2565679ef19feaa6ed8564ddde857759aa9a912c80fa2c6d5e315 ΔUp=-2 ΔDown=-2"
+  },
+  {
+    "name": "Maker order rests (PostOnly, SELL Up @0.90)",
+    "ok": true,
+    "detail": "orderId=129127208515966863056 fills=0"
+  },
+  {
+    "name": "Read own resting orders on-chain",
+    "ok": true,
+    "detail": "1 resting"
+  },
+  {
+    "name": "Taker order fills (IOC BUY Up crosses book)",
+    "ok": true,
+    "detail": "filled 1 @ 0.368"
+  },
+  {
+    "name": "cancelOrder (cancel resting maker)",
+    "ok": true,
+    "detail": "0xf0e282915b730fc7298070c08337a0893a1e4af441ca93c6bacadc8c01b63afe"
+  },
+  {
+    "name": "PostOnly crossing order rejected SILENTLY (bug)",
+    "ok": true,
+    "detail": "status=success orderId=undefined (undefined+success = the silent reject)"
+  },
+  {
+    "name": "Unified path / loadMarkets (indexer)",
+    "ok": false,
+    "detail": "indexer down: @somnia-chain/markets-sdk: indexer RegistryMarkets failed: f"
+  },
+  {
+    "name": "listBinaryMarkets (indexer discovery)",
+    "ok": false,
+    "detail": "indexer down: @somnia-chain/markets-sdk: indexer BinaryMarkets failed: fet"
+  }
+]
