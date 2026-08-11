@@ -48,7 +48,7 @@ const M=[
  ["10","read","Own resting orders on-chain","✔ Yes",GREEN,"1 resting"],
  ["11","write","Taker order fills (IOC BUY Up crosses)","✔ Yes",GREEN,"filled 1 @ 0.368"],
  ["12","write","cancelOrder (cancel resting maker)","✔ Yes",GREEN,"0xf0e282…3afe"],
- ["13","write","Settle → redeem winner after resolution","⏳ Pending",AMBER,"market settling"],
+ ["13","write","Settle → redeem winner after resolution","✔ Yes",GREEN,"Down won; 10→10 USDC 0xbfd0c9…"],
  ["14","bug","PostOnly crossing order rejected SILENTLY","⚠ Repro",AMBER,"success + orderId undefined"],
  ["15","packaging","import under native Node (node bot.mjs)","✘ No",RED,"ERR_MODULE_NOT_FOUND"],
  ["16","indexer","loadMarkets / unified createOrder","✘ Down",RED,"indexer HTTP 000"],
@@ -101,7 +101,8 @@ const doc=new Document({
         "faucet                 0xcfaddaa5de777bda5887a4089be15e6665c5940c02944108fef4b18d01f9a062\n"+
         "mintSet                0xa80c0949cc4498613aa5a69c553371dc8a5c90c6376c432b01448ff5f8fdb6ab\n"+
         "maker rest (SELL Up)   0xf211d5aad05af43a189210a62149de841fd5a594f1677eaa256940ef7d95153c\n"+
-        "taker fill (BUY Up, 2) 0x9e5f9c286247af357ae8928e63bf8ca8f980285555ecf4cdba12f0472d1120b9"),
+        "taker fill (BUY Up, 2) 0x9e5f9c286247af357ae8928e63bf8ca8f980285555ecf4cdba12f0472d1120b9\n"+
+        "settle → redeem       0xbfd0c93c44bef14b36657e7194ada9225befc2b58d9e307561f257fa3d0a8c24  (Down won, 10→10 USDC)"),
       P([run("The maker on the book (0x789f…) quoted a two-sided market around 50/50 with a ~0.03 spread \u2014 tighter than the maker in the first review. ",{}),run("Bottom line: the team fixed the UI issues; the venue trades end-to-end; the remaining gaps are SDK packaging and an unreliable documented indexer.",{bold:true})]),
     ],
   }],

@@ -34,7 +34,7 @@ row in the matrix below was executed live and recorded — nothing is inferred.
 | 10 | SDK / read | Read own resting orders on-chain | ✅ Yes | 1 resting |
 | 11 | Trade / write | Taker order fills (IOC BUY Up crosses book) | ✅ Yes | filled 1 @ 0.368 |
 | 12 | Trade / write | `cancelOrder` (cancel resting maker) | ✅ Yes | `0xf0e282…3afe` |
-| 13 | Trade / write | Settle → redeem winning side after resolution | ⏳ Pending | market settling; see `redeem-result-retest.json` |
+| 13 | Trade / write | Settle → redeem winning side after resolution | ✅ Yes | Finalized, Down won; 10 Down → 10 USDC · `0xbfd0c9…8c24` |
 | 14 | SDK / bug | PostOnly crossing order rejected **silently** (success + no orderId) | ⚠️ Repro | returns `success`, `orderId: undefined` |
 | 15 | SDK / packaging | `import` under native Node (`node bot.mjs`) | ❌ No | `ERR_MODULE_NOT_FOUND` (extensionless ESM) |
 | 16 | SDK / indexer | `loadMarkets` / unified `createOrder` (needs indexer snapshot) | ❌ Down | indexer `HTTP 000` |
@@ -107,6 +107,7 @@ Full trade re-run on BTC-60min (`marketId 0x…3f04`), RPC-only (indexer bypasse
 | mintSet | `0xa80c0949cc4498613aa5a69c553371dc8a5c90c6376c432b01448ff5f8fdb6ab` |
 | maker rest (SELL Up) | `0xf211d5aad05af43a189210a62149de841fd5a594f1677eaa256940ef7d95153c` |
 | taker fill (BUY Up, 2 filled) | `0x9e5f9c286247af357ae8928e63bf8ca8f980285555ecf4cdba12f0472d1120b9` |
+| settle → redeem (Down won, 10 → 10 USDC) | `0xbfd0c93c44bef14b36657e7194ada9225befc2b58d9e307561f257fa3d0a8c24` |
 
 The maker on the book (`0x789f…`) quoted a two-sided market around 50/50 with a
 ~0.03 spread — tighter than the maker seen in the first review.
@@ -123,4 +124,6 @@ Scripts under `methodology/` (run with `tsx`; disposable key in a git-ignored fi
 - `osettle.mjs` — indexer-free settler: polls `getMarketOnchain` until finalized, then redeems
 - `bot.mjs` / `census.mjs` / `check.mjs` — first-review scripts (mint, book census, readback)
 
-_Row 13 (settle → redeem) tx is appended once the traded market resolves._
+Row 13 confirmed: the traded market finalized (Down won) and the winning side
+redeemed 1:1 — full lifecycle **faucet → mint → maker → taker → settle → redeem**
+verified this retest. See `methodology/redeem-result-retest.json`.
