@@ -1,0 +1,17 @@
+{
+  "marketId": "0x0000000000000000000000000000000000000000000000000000000000003f04",
+  "status": 4,
+  "finalized": true,
+  "isResolved": true,
+  "isVoided": false,
+  "winningOutcome": "1",
+  "steps": [
+    {
+      "redeem": "Down-wins",
+      "outcomeIdx": 1,
+      "amount": "10000000",
+      "tx": "0xbfd0c93c44bef14b36657e7194ada9225befc2b58d9e307561f257fa3d0a8c24",
+      "status": "success"
+    }
+  ]
+}
